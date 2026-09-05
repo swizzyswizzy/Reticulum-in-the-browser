@@ -1,7 +1,7 @@
 #!/bin/bash
 # Instalacja na Raspberry Pi. Uruchamiaj jako root.
 set -e
-REPO="${1:-${RNS_GW_REPO:-https://github.com/YOURUSER/reticulum-gateway.git}}"
+REPO="${1:-${RNS_GW_REPO:-https://github.com/swizzyswizzy/Reticulum-in-the-browser.git}}"
 DEST=/opt/reticulum-gateway
 HOME_RNS=/var/lib/rns
 

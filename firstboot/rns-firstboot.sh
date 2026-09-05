@@ -2,7 +2,7 @@
 # Wrzucasz to na partycję boot karty SD. Pierwszy start sam ściąga repo i stawia bramkę.
 set -e
 FLAG=/var/lib/rns/.firstboot-done
-REPO="${RNS_GW_REPO:-https://github.com/YOURUSER/reticulum-gateway.git}"
+REPO="${RNS_GW_REPO:-https://github.com/swizzyswizzy/Reticulum-in-the-browser.git}"
 RAW="${REPO%.git}"
 RAW="${RAW/github.com/raw.githubusercontent.com}/main/install.sh"
 

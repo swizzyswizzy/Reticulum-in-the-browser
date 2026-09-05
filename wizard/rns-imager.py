@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Jeden ekran: pobiera Lite 64-bit, zapisuje kartę."""
+"""Pobiera Lite 64-bit i wgrywa od zera na wybraną kartę."""
 
 from __future__ import annotations
 
+import json
+import lzma
 import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -21,6 +24,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -31,7 +35,8 @@ from PySide6.QtWidgets import (
 
 IMAGE_URL = "https://downloads.raspberrypi.com/raspios_lite_arm64_latest"
 CACHE = os.path.join(os.path.expanduser("~"), ".cache", "reticulum-gateway")
-
+REPO_URL = "https://github.com/swizzyswizzy/Reticulum-in-the-browser.git"
+MAX_CARD_BYTES = 256 * 1024 * 1024 * 1024
 
 STYLE = """
 QMainWindow, QWidget#root { background: #1b1e1c; color: #d7ddd4; }
@@ -64,66 +69,316 @@ QFrame#box { border: 1px solid #2c332c; background: #161916; }
 """
 
 
-def repo_url():
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+def gb(n):
     try:
-        url = subprocess.check_output(
-            ["git", "-C", root, "remote", "get-url", "origin"],
-            text=True, stderr=subprocess.DEVNULL,
-        ).strip()
+        return f"{int(n) / (1024 ** 3):.1f} GB"
     except Exception:
-        return ""
-    if url.startswith("git@"):
-        path = url.split(":", 1)[-1]
-        url = "https://github.com/" + path
-    if url.endswith(".git") is False:
-        url += ".git"
-    return url
+        return "?"
 
 
-def is_bootfs(path):
-    return os.path.isfile(os.path.join(path, "cmdline.txt")) and os.path.isfile(
-        os.path.join(path, "config.txt")
+def ps(cmd):
+    return subprocess.check_output(
+        ["powershell", "-NoProfile", "-Command", cmd],
+        text=True, stderr=subprocess.STDOUT,
     )
 
 
-def list_cards():
-    cards = []
+def list_disks():
+    disks = []
     if os.name == "nt":
-        try:
-            raw = subprocess.check_output(
-                ["wmic", "logicaldisk", "where", "drivetype=2", "get", "deviceid,size,volumename"],
-                text=True, stderr=subprocess.DEVNULL, creationflags=0x08000000,
+        raw = ps(
+            "Get-CimInstance Win32_DiskDrive | "
+            "Select-Object Index,Model,Size,InterfaceType,MediaType | ConvertTo-Json -Compress"
+        ).strip()
+        data = json.loads(raw or "[]")
+        if isinstance(data, dict):
+            data = [data]
+        for d in data:
+            size = int(d.get("Size") or 0)
+            idx = d.get("Index")
+            if idx is None or int(idx) == 0 or size <= 0 or size > MAX_CARD_BYTES:
+                continue
+            iface = (d.get("InterfaceType") or "").upper()
+            if iface in ("NVME", "IDE") and "REMOVABLE" not in (d.get("MediaType") or "").upper():
+                continue
+            model = (d.get("Model") or "Dysk").strip()
+            kind = (d.get("InterfaceType") or d.get("MediaType") or "").strip()
+            disks.append({
+                "id": str(idx),
+                "label": f"{model} · {gb(size)}" + (f" · {kind}" if kind else ""),
+                "dev": f"\\\\.\\PhysicalDrive{idx}",
+                "size": size,
+                "index": int(idx),
+            })
+    else:
+        raw = subprocess.check_output(["lsblk", "-J", "-b", "-o", "NAME,SIZE,MODEL,TRAN,TYPE,RM,MOUNTPOINT"], text=True)
+        data = json.loads(raw)
+        for d in data.get("blockdevices") or []:
+            if d.get("type") != "disk":
+                continue
+            size = int(d.get("size") or 0)
+            if size <= 0 or size > MAX_CARD_BYTES:
+                continue
+            mounts = []
+
+            def walk(node):
+                if node.get("mountpoint"):
+                    mounts.append(node["mountpoint"])
+                for ch in node.get("children") or []:
+                    walk(ch)
+
+            walk(d)
+            if any(m in ("/", "/boot", "/home") for m in mounts):
+                continue
+            name = d.get("name")
+            model = (d.get("model") or name or "dysk").strip()
+            disks.append({
+                "id": name,
+                "label": f"{model} · {gb(size)}" + (f" · {d.get('tran')}" if d.get("tran") else ""),
+                "dev": "/dev/" + name,
+                "size": size,
+                "index": name,
+            })
+    return disks
+
+
+def is_admin():
+    if os.name != "nt":
+        return os.geteuid() == 0
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def elevate():
+    if os.name != "nt" or is_admin():
+        return
+    import ctypes
+    script = os.path.abspath(__file__)
+    rc = ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", sys.executable, f'"{script}"', os.path.dirname(script), 1,
+    )
+    if rc > 32:
+        sys.exit(0)
+
+
+def prepare_windows_disk(index):
+    ps(
+        f"Get-Disk -Number {index} | Get-Partition | ForEach-Object {{ "
+        f"if ($_.DriveLetter) {{ $d = $_.DriveLetter + ':'; "
+        f"try {{ mountvol $d /P }} catch {{}} }} }}"
+    )
+
+
+def win_last_error():
+    import ctypes
+    err = ctypes.GetLastError()
+    buf = ctypes.create_unicode_buffer(256)
+    ctypes.windll.kernel32.FormatMessageW(0x00001000, None, err, 0, buf, 255, None)
+    return err, buf.value.strip()
+
+
+FSCTL_LOCK_VOLUME = 0x00090018
+FSCTL_DISMOUNT_VOLUME = 0x00090020
+FSCTL_ALLOW_EXTENDED_DASD_IO = 0x00090083
+IOCTL_DISK_SET_DISK_ATTRIBUTES = 0x0007C0C4
+
+
+def win_ioctl(handle, code):
+    import ctypes
+    from ctypes import wintypes
+    returned = wintypes.DWORD()
+    ctypes.windll.kernel32.DeviceIoControl(handle, code, None, 0, None, 0, ctypes.byref(returned), None)
+
+
+def win_clear_readonly(handle):
+    import ctypes
+    from ctypes import wintypes
+
+    class SET_DISK_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [
+            ("Version", wintypes.DWORD),
+            ("Persist", wintypes.BOOLEAN),
+            ("Reserved1", ctypes.c_ubyte * 3),
+            ("Attributes", ctypes.c_ulonglong),
+            ("AttributesMask", ctypes.c_ulonglong),
+            ("Reserved2", wintypes.DWORD * 4),
+        ]
+
+    info = SET_DISK_ATTRIBUTES()
+    info.Version = ctypes.sizeof(SET_DISK_ATTRIBUTES)
+    info.Persist = 1
+    info.Attributes = 0
+    info.AttributesMask = 0x1 | 0x2
+    returned = wintypes.DWORD()
+    ctypes.windll.kernel32.DeviceIoControl(
+        handle, IOCTL_DISK_SET_DISK_ATTRIBUTES,
+        ctypes.byref(info), ctypes.sizeof(info),
+        None, 0, ctypes.byref(returned), None,
+    )
+
+
+def win_kill_writeprotect_policy():
+    try:
+        import winreg
+        key = winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\StorageDevicePolicies")
+        winreg.SetValueEx(key, "WriteProtect", 0, winreg.REG_DWORD, 0)
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+
+def win_open_path(path, share=3):
+    import ctypes
+    from ctypes import wintypes
+    GENERIC_READ = 0x80000000
+    GENERIC_WRITE = 0x40000000
+    OPEN_EXISTING = 3
+    k32 = ctypes.windll.kernel32
+    k32.CreateFileW.restype = wintypes.HANDLE
+    handle = k32.CreateFileW(
+        path, GENERIC_READ | GENERIC_WRITE, share,
+        None, OPEN_EXISTING, 0, None,
+    )
+    if handle == ctypes.c_void_p(-1).value or int(handle) in (-1, 0xFFFFFFFF):
+        err, msg = win_last_error()
+        raise RuntimeError(f"{path} ({err}) {msg}")
+    return handle
+
+
+def win_letters(index):
+    raw = ps(f"Get-Partition -DiskNumber {index} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty DriveLetter")
+    out = []
+    for line in raw.splitlines():
+        s = line.strip().rstrip(":")
+        if len(s) == 1 and s.isalpha():
+            out.append(s.upper())
+    return out
+
+
+def win_ensure_letter(index):
+    letters = win_letters(index)
+    if letters:
+        return letters
+    script = os.path.join(CACHE, "diskpart-part.txt")
+    os.makedirs(CACHE, exist_ok=True)
+    with open(script, "w", encoding="ascii", newline="\r\n") as fh:
+        fh.write(f"select disk {index}\r\n")
+        fh.write("online disk noerr\r\n")
+        fh.write("attribute disk clear readonly\r\n")
+        fh.write("create partition primary noerr\r\n")
+        fh.write("assign noerr\r\n")
+    subprocess.check_output(["diskpart", "/s", script], text=True, stderr=subprocess.STDOUT)
+    time.sleep(2)
+    return win_letters(index)
+
+
+def win_lock_volumes(letters):
+    handles = []
+    for letter in letters:
+        path = f"\\\\.\\{letter}:"
+        h = win_open_path(path, share=3)
+        win_ioctl(h, FSCTL_ALLOW_EXTENDED_DASD_IO)
+        win_ioctl(h, FSCTL_LOCK_VOLUME)
+        win_ioctl(h, FSCTL_DISMOUNT_VOLUME)
+        handles.append(h)
+    return handles
+
+
+def win_open_disk(index):
+    import ctypes
+    from ctypes import wintypes
+
+    GENERIC_READ = 0x80000000
+    GENERIC_WRITE = 0x40000000
+    OPEN_EXISTING = 3
+    FILE_FLAG_WRITE_THROUGH = 0x80000000
+    INVALID = ctypes.c_void_p(-1).value
+
+    win_kill_writeprotect_policy()
+    k32 = ctypes.windll.kernel32
+    k32.CreateFileW.restype = wintypes.HANDLE
+    paths = [f"\\\\.\\PhysicalDrive{index}", f"\\\\.\\Harddisk{index}Partition0"]
+    last = "brak uchwytu"
+    for path in paths:
+        for share in (0, 3):
+            handle = k32.CreateFileW(
+                path, GENERIC_READ | GENERIC_WRITE, share,
+                None, OPEN_EXISTING, FILE_FLAG_WRITE_THROUGH, None,
             )
-        except Exception:
-            raw = ""
-        for line in raw.splitlines():
-            parts = line.split()
-            if len(parts) >= 1 and re.match(r"^[A-Z]:$", parts[0]):
-                letter = parts[0] + "/"
-                size = 0
-                for p in parts[1:]:
-                    if p.isdigit():
-                        size = int(p)
-                gb = size / (1024 ** 3) if size else 0
-                name = f"Karta {gb:.1f} GB" if gb else "Karta SD"
-                cards.append({"label": name, "boot": letter if is_bootfs(letter) else "", "root": letter})
-        if not cards:
+            if handle == INVALID or int(handle) in (-1, 0xFFFFFFFF):
+                err, msg = win_last_error()
+                last = f"{path} share={share} ({err}) {msg}"
+                continue
+            win_clear_readonly(handle)
+            win_ioctl(handle, FSCTL_ALLOW_EXTENDED_DASD_IO)
+            win_ioctl(handle, FSCTL_LOCK_VOLUME)
+            win_ioctl(handle, FSCTL_DISMOUNT_VOLUME)
+            return handle
+    raise RuntimeError("CreateFile " + last)
+
+
+def win_write_disk(handle, data):
+    import ctypes
+    from ctypes import wintypes
+    written = wintypes.DWORD()
+    ok = ctypes.windll.kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
+    if not ok:
+        err, msg = win_last_error()
+        raise RuntimeError(f"WriteFile ({err}) {msg}")
+    return written.value
+
+
+def win_close(handle):
+    import ctypes
+    ctypes.windll.kernel32.FlushFileBuffers(handle)
+    ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def win_clean_and_offline(index):
+    script = os.path.join(CACHE, "diskpart.txt")
+    os.makedirs(CACHE, exist_ok=True)
+    with open(script, "w", encoding="ascii", newline="\r\n") as fh:
+        fh.write("automount disable\r\n")
+        fh.write("automount scrub\r\n")
+        fh.write(f"select disk {index}\r\n")
+        fh.write("online disk noerr\r\n")
+        fh.write("attribute disk clear readonly\r\n")
+        fh.write("clean\r\n")
+        fh.write("online disk noerr\r\n")
+        fh.write("attribute disk clear readonly\r\n")
+    out = subprocess.check_output(["diskpart", "/s", script], text=True, stderr=subprocess.STDOUT)
+    try:
+        ps(
+            f"Set-Disk -Number {index} -IsReadOnly $false -ErrorAction SilentlyContinue; "
+            f"Set-Disk -Number {index} -IsOffline $false -ErrorAction SilentlyContinue"
+        )
+    except Exception:
+        pass
+    return out
+
+
+def find_bootfs(timeout=90):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.name == "nt":
             for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
                 root = f"{letter}:/"
-                if is_bootfs(root):
-                    cards.append({"label": "Karta Raspberry", "boot": root, "root": root})
-    else:
-        for base in ("/media", "/run/media", "/Volumes", "/mnt"):
-            if not os.path.isdir(base):
-                continue
-            for dirpath, dirnames, filenames in os.walk(base):
-                if "cmdline.txt" in filenames and "config.txt" in filenames:
-                    cards.append({"label": "Karta Raspberry", "boot": dirpath, "root": dirpath})
-                    dirnames.clear()
-                if dirpath[len(base):].count(os.sep) >= 3:
-                    dirnames.clear()
-    return cards
+                if os.path.isfile(os.path.join(root, "cmdline.txt")) and os.path.isfile(os.path.join(root, "config.txt")):
+                    return root
+        else:
+            for base in ("/media", "/run/media", "/Volumes", "/mnt"):
+                if not os.path.isdir(base):
+                    continue
+                for dirpath, dirnames, filenames in os.walk(base):
+                    if "cmdline.txt" in filenames and "config.txt" in filenames:
+                        return dirpath
+                    if dirpath[len(base):].count(os.sep) >= 3:
+                        dirnames.clear()
+        time.sleep(2)
+    return ""
 
 
 def patch_cmdline(text: str) -> str:
@@ -149,8 +404,8 @@ def nm_file(kind, ssid, psk, dhcp, ip, prefix, gw, dns):
     return "\n".join(lines) + "\n"
 
 
-def firstrun_script(repo, kind):
-    repo_q = repo.replace("'", "'\\''")
+def firstrun_script(kind):
+    repo_q = REPO_URL.replace("'", "'\\''")
     return f"""#!/bin/bash
 set +e
 exec > /boot/firmware/rns-firstboot.log 2>&1 || exec > /boot/rns-firstboot.log 2>&1
@@ -184,9 +439,7 @@ apt-get update -qq
 apt-get install -y -qq curl ca-certificates git python3 python3-pip openssl
 RAW="{repo_q}"
 RAW="${{RAW%.git}}"
-case "$RAW" in
-  https://github.com/*) RAW="https://raw.githubusercontent.com/${{RAW#https://github.com/}}/main/install.sh" ;;
-esac
+RAW="https://raw.githubusercontent.com/${{RAW#https://github.com/}}/main/install.sh"
 curl -fsSL "$RAW" -o /tmp/rns-install.sh && bash /tmp/rns-install.sh '{repo_q}'
 sed -i -E 's/ systemd.run[^ ]*//g' "$BOOT/cmdline.txt" 2>/dev/null
 rm -f "$BOOT/firstrun.sh" "$BOOT/rns-net.nmconnection"
@@ -194,13 +447,13 @@ echo "RNS firstboot done"
 """
 
 
-def write_boot(boot, repo, kind, wifi, static):
+def write_boot(boot, kind, wifi, static):
     with open(os.path.join(boot, "cmdline.txt"), encoding="utf-8") as fh:
         cmd = fh.read()
     with open(os.path.join(boot, "cmdline.txt"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write(patch_cmdline(cmd))
     with open(os.path.join(boot, "firstrun.sh"), "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(firstrun_script(repo, kind))
+        fh.write(firstrun_script(kind))
     if kind == "wifi" or not static["dhcp"]:
         with open(os.path.join(boot, "rns-net.nmconnection"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(nm_file(
@@ -213,37 +466,132 @@ def write_boot(boot, repo, kind, wifi, static):
 class Worker(QObject):
     progress = Signal(int)
     log = Signal(str)
-    done = Signal(str)
+    done = Signal()
     fail = Signal(str)
 
-    def __init__(self, dest_xz):
+    def __init__(self, disk, kind, wifi, static):
         super().__init__()
-        self.dest_xz = dest_xz
-        self._stop = False
+        self.disk = disk
+        self.kind = kind
+        self.wifi = wifi
+        self.static = static
 
     def run(self):
-        os.makedirs(os.path.dirname(self.dest_xz), exist_ok=True)
-        self.log.emit("pobieram Raspberry Pi OS Lite 64-bit")
         try:
-            req = urllib.request.Request(IMAGE_URL, headers={"User-Agent": "rns-imager"})
-            with urllib.request.urlopen(req, timeout=60) as src:
-                total = int(src.headers.get("Content-Length") or 0)
-                got = 0
-                with open(self.dest_xz, "wb") as out:
-                    while True:
-                        chunk = src.read(1024 * 256)
-                        if not chunk:
-                            break
-                        out.write(chunk)
-                        got += len(chunk)
-                        if total:
-                            self.progress.emit(int(got * 100 / total))
-                        elif got:
-                            self.progress.emit(min(99, got // (1024 * 1024)))
+            xz = self.download()
+            self.flash(xz)
+            self.log.emit("czekam aż system zobaczy boot…")
+            boot = find_bootfs(120)
+            if not boot:
+                raise RuntimeError("po wgraniu nie widzę bootfs — wyjmij i włóż kartę, Odśwież nie pomoże, uruchom RUN jeszcze raz")
+            self.log.emit("dopisuję firstboot")
+            write_boot(boot, self.kind, self.wifi, self.static)
             self.progress.emit(100)
-            self.done.emit(self.dest_xz)
+            self.done.emit()
         except Exception as exc:
             self.fail.emit(str(exc))
+
+    def download(self):
+        os.makedirs(CACHE, exist_ok=True)
+        dest = os.path.join(CACHE, "raspios-lite-arm64.img.xz")
+        if os.path.isfile(dest) and os.path.getsize(dest) > 20_000_000:
+            self.log.emit("obraz z cache")
+            self.progress.emit(20)
+            return dest
+        self.log.emit("pobieram Raspberry Pi OS Lite 64-bit")
+        req = urllib.request.Request(IMAGE_URL, headers={"User-Agent": "rns-imager"})
+        with urllib.request.urlopen(req, timeout=60) as src:
+            total = int(src.headers.get("Content-Length") or 0)
+            got = 0
+            tmp = dest + ".part"
+            with open(tmp, "wb") as out:
+                while True:
+                    chunk = src.read(256 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    got += len(chunk)
+                    if total:
+                        self.progress.emit(int(got * 20 / total))
+            os.replace(tmp, dest)
+        self.progress.emit(20)
+        return dest
+
+    def flash(self, xz):
+        self.log.emit("kasuję kartę i wgrywam obraz")
+        if os.name == "nt":
+            self.flash_windows(xz)
+        else:
+            self.flash_unix(xz)
+        self.progress.emit(95)
+
+    def flash_unix(self, xz):
+        flags = os.O_RDWR
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        fd = os.open(self.disk["dev"], flags)
+        written = 0
+        try:
+            with lzma.open(xz, "rb") as src:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    os.write(fd, chunk)
+                    written += len(chunk)
+                    self.progress.emit(20 + min(75, int(written * 75 / (2800 * 1024 * 1024))))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        self.log.emit(f"wgrane {gb(written)}")
+
+    def flash_windows(self, xz):
+        if not is_admin():
+            raise RuntimeError("brak uprawnień administratora — kliknij bat i zatwierdź UAC")
+        idx = self.disk["index"]
+        win_kill_writeprotect_policy()
+        self.log.emit("zamykam woluminy (schemat Win32 Disk Imager / Rufus)")
+        letters = win_ensure_letter(idx)
+        self.log.emit("litery: " + (", ".join(letters) if letters else "(brak)"))
+        locked = []
+        if letters:
+            locked = win_lock_volumes(letters)
+            self.log.emit("woluminy zablokowane")
+        handle = None
+        written = 0
+        try:
+            handle = win_open_path(f"\\\\.\\PhysicalDrive{idx}", share=0)
+            win_clear_readonly(handle)
+            win_ioctl(handle, FSCTL_ALLOW_EXTENDED_DASD_IO)
+            win_ioctl(handle, FSCTL_LOCK_VOLUME)
+            self.log.emit("PhysicalDrive otwarty na wyłączność")
+            with lzma.open(xz, "rb") as src:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    if len(chunk) % 512:
+                        chunk = chunk + b"\x00" * (512 - len(chunk) % 512)
+                    off = 0
+                    while off < len(chunk):
+                        off += win_write_disk(handle, chunk[off:])
+                    written += len(chunk)
+                    self.progress.emit(20 + min(75, int(written * 75 / (2800 * 1024 * 1024))))
+        finally:
+            if handle:
+                win_close(handle)
+            for h in locked:
+                try:
+                    win_close(h)
+                except Exception:
+                    pass
+        if written == 0:
+            raise RuntimeError("zero bajtów zapisanych")
+        self.log.emit(f"wgrane {gb(written)}")
+        try:
+            ps("Update-HostStorageCache")
+        except Exception:
+            pass
 
 
 def box():
@@ -260,7 +608,7 @@ class App(QMainWindow):
         super().__init__()
         self.setWindowTitle("Reticulum SD")
         self.resize(640, 640)
-        self.cards = []
+        self.disks = []
         self.thread = None
         root = QWidget()
         root.setObjectName("root")
@@ -271,7 +619,7 @@ class App(QMainWindow):
 
         title = QLabel("RETICULUM  ·  karta SD")
         title.setObjectName("title")
-        hint = QLabel("Lite 64-bit ściągnie się sam. Włóż kartę, ustaw sieć, RUN.")
+        hint = QLabel("Wybierz nośnik. RUN ściągnie Lite 64-bit i wgra go od zera (cała karta idzie w diabły).")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         col.addWidget(title)
@@ -279,11 +627,11 @@ class App(QMainWindow):
 
         b1 = box()
         row = QHBoxLayout()
-        row.addWidget(QLabel("Karta"))
+        row.addWidget(QLabel("Nośnik"))
         self.card = QComboBox()
         row.addWidget(self.card, 1)
         scan = QPushButton("Odśwież")
-        scan.clicked.connect(self.refresh_cards)
+        scan.clicked.connect(self.refresh)
         row.addWidget(scan)
         b1.layout().addLayout(row)
         self.err_card = QLabel("")
@@ -352,25 +700,17 @@ class App(QMainWindow):
         b3.layout().addWidget(self.err_ip)
         col.addWidget(b3)
 
-        repo = repo_url()
-        info = QLabel(
-            "System i bramka wezmą się z internetu przy pierwszym starcie Pi. "
-            + (f"Repo: {repo}" if repo else "Wypchnij to repo na GitHub (git remote origin).")
-        )
+        info = QLabel("Po starcie Pi dociągnie bramkę z github.com/swizzyswizzy/Reticulum-in-the-browser")
         info.setObjectName("hint")
         info.setWordWrap(True)
         col.addWidget(info)
-        self.repo = repo
 
         self.bar = QProgressBar()
-        self.bar.setValue(0)
         col.addWidget(self.bar)
-
         run = QPushButton("RUN")
         run.setObjectName("run")
         run.clicked.connect(self.run)
         col.addWidget(run)
-
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.log.setMinimumHeight(120)
@@ -381,9 +721,9 @@ class App(QMainWindow):
         self.dhcp.toggled.connect(self.sync)
         self.static.toggled.connect(self.sync)
         self.sync()
-        self.refresh_cards()
-        if self.repo:
-            self.say("repo " + self.repo)
+        self.refresh()
+        if os.name == "nt" and not is_admin():
+            self.say("uruchom jako administrator, inaczej zapis całego dysku padnie")
 
     def sync(self):
         self.wifi_box.setVisible(self.wifi.isChecked())
@@ -396,32 +736,34 @@ class App(QMainWindow):
     def mark(self, w, bad):
         w.setStyleSheet("border: 1px solid #e08a7a;" if bad else "")
 
-    def refresh_cards(self):
+    def refresh(self):
         self.card.clear()
-        self.cards = list_cards()
-        if not self.cards:
+        try:
+            self.disks = list_disks()
+        except Exception as exc:
+            self.disks = []
+            self.say("skan dysków: " + str(exc))
+        if not self.disks:
             self.card.addItem("włóż kartę i odśwież")
-            self.say("nie widzę karty")
             return
-        for c in self.cards:
-            extra = " · gotowa" if c.get("boot") else ""
-            self.card.addItem(c["label"] + extra)
-        self.say("karta: " + self.cards[0]["label"])
+        for d in self.disks:
+            self.card.addItem(d["label"])
+        self.say("widzę " + str(len(self.disks)) + " nośnik(i)")
 
     def selected(self):
         i = self.card.currentIndex()
-        if i < 0 or i >= len(self.cards):
+        if i < 0 or i >= len(self.disks):
             return None
-        return self.cards[i]
+        return self.disks[i]
 
     def run(self):
         self.err_card.setText("")
         self.err_net.setText("")
         self.err_ip.setText("")
+        disk = self.selected()
         bad = False
-        card = self.selected()
-        if not card:
-            self.err_card.setText("tu: włóż kartę SD i odśwież")
+        if not disk:
+            self.err_card.setText("tu: wybierz nośnik z listy")
             bad = True
         if self.wifi.isChecked() and not self.ssid.text().strip():
             self.err_net.setText("tu: brak SSID")
@@ -435,70 +777,45 @@ class App(QMainWindow):
             bad = True
         else:
             self.mark(self.ip, False)
-        if not self.repo or "YOURUSER" in self.repo:
-            self.err_card.setText("to repo nie ma publicznego origin — wypchnij je na GitHub")
-            bad = True
         if bad:
-            self.say("stop — popraw czerwone")
+            self.say("stop")
             return
-
-        dest = os.path.join(CACHE, "raspios-lite-arm64.img.xz")
-        if os.path.isfile(dest) and os.path.getsize(dest) > 10_000_000:
-            self.say("obraz już jest w cache")
-            self.bar.setValue(100)
-            self.after_download(dest)
+        if QMessageBox.question(
+            self, "Kasowanie karty",
+            f"To WYMAŻE cały nośnik:\n{disk['label']}\n\nKontynuować?",
+        ) != QMessageBox.Yes:
+            self.say("anulowane")
             return
-
-        self.say("ściągam obraz…")
+        kind = "wifi" if self.wifi.isChecked() else "ethernet"
         self.thread = QThread()
-        self.worker = Worker(dest)
+        self.worker = Worker(
+            disk, kind,
+            {"ssid": self.ssid.text(), "psk": self.psk.text()},
+            {
+                "dhcp": self.dhcp.isChecked(),
+                "ip": self.ip.text().strip(),
+                "prefix": self.prefix.text().strip() or "24",
+                "gw": self.gw.text().strip(),
+                "dns": self.dns.text().strip() or "1.1.1.1",
+            },
+        )
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.bar.setValue)
         self.worker.log.connect(self.say)
-        self.worker.done.connect(self.after_download)
-        self.worker.fail.connect(self.download_fail)
+        self.worker.done.connect(lambda: self.say("gotowe. karta do Pi, zasilanie, 3–5 min, http://IP:4240"))
+        self.worker.fail.connect(lambda e: self.fail(e))
         self.worker.done.connect(self.thread.quit)
         self.worker.fail.connect(self.thread.quit)
         self.thread.start()
 
-    def download_fail(self, err):
-        self.say("pobieranie padło: " + err)
-        self.err_card.setText("tu: nie ściągnąłem obrazu — sieć?")
-
-    def after_download(self, _path):
-        card = self.selected()
-        if not card:
-            self.err_card.setText("tu: karta zniknęła")
-            return
-        boot = card.get("boot") or ""
-        if not boot or not is_bootfs(boot):
-            self.say("karta nie ma jeszcze systemu — nagraj Lite tym obrazem z cache, odśwież, RUN jeszcze raz")
-            self.say("cache: " + os.path.join(CACHE, "raspios-lite-arm64.img.xz"))
-            self.err_card.setText("tu: po nagraniu Lite odśwież kartę i RUN")
-            return
-        kind = "wifi" if self.wifi.isChecked() else "ethernet"
-        try:
-            write_boot(
-                boot, self.repo, kind,
-                {"ssid": self.ssid.text(), "psk": self.psk.text()},
-                {
-                    "dhcp": self.dhcp.isChecked(),
-                    "ip": self.ip.text().strip(),
-                    "prefix": self.prefix.text().strip() or "24",
-                    "gw": self.gw.text().strip(),
-                    "dns": self.dns.text().strip() or "1.1.1.1",
-                },
-            )
-        except Exception as exc:
-            self.say("zapis boot: " + str(exc))
-            self.err_card.setText("tu: nie zapisałem na kartę")
-            return
-        self.say("zapisane. wyjmij kartę → Pi → zasilanie")
-        self.say("pierwszy start 3–5 min, potem http://IP:4240")
+    def fail(self, err):
+        self.err_card.setText("tu: " + err)
+        self.say("błąd: " + err)
 
 
 def main():
+    elevate()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setFont(QFont("Segoe UI", 10))
