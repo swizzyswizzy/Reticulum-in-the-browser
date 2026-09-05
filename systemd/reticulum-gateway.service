@@ -1,0 +1,18 @@
+[Unit]
+Description=Reticulum Gateway
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=rns
+Group=rns
+Environment=HOME=/var/lib/rns
+WorkingDirectory=/opt/reticulum-gateway/gateway
+ExecStart=/usr/bin/python3 /opt/reticulum-gateway/gateway/gateway.py
+Restart=always
+RestartSec=4
+ExecStartPost=/bin/sh -c 'hostname -I > /var/lib/rns/ip.txt || true'
+
+[Install]
+WantedBy=multi-user.target
