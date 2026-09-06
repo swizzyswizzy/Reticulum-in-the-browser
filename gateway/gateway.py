@@ -12,7 +12,8 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.request import Request, urlopen
 
 PORT = 80
 HTTPS_PORT = 443
@@ -471,6 +472,34 @@ def is_our_node(dest_hash) -> bool:
     return False
 
 
+def node_name_for(dest_hash_hex: str) -> str:
+    with nodes_lock:
+        n = nodes.get(dest_hash_hex) or {}
+    return (n.get("name") or "").strip()
+
+
+def try_lan_page(name: str, path: str) -> dict | None:
+    if not name or name.startswith("demo"):
+        return None
+    hosts = []
+    for h in (name + ".local", name):
+        if h not in hosts:
+            hosts.append(h)
+    for host in hosts:
+        url = f"http://{host}/api/localpage?path={quote(path)}"
+        try:
+            req = Request(url, headers={"User-Agent": "rns-gateway"})
+            with urlopen(req, timeout=4) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if data.get("ok") and (data.get("text") or data.get("html")):
+                data["source"] = "lan"
+                print(f"[gateway] strona z LAN {host}")
+                return data
+        except Exception as exc:
+            print(f"[gateway] LAN {host}: {exc}")
+    return None
+
+
 def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> dict:
     path = path or "/page/index.mu"
     if not path.startswith("/"):
@@ -530,6 +559,11 @@ def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> di
 
         identity = RNS.Identity.recall(dest_hash)
         if identity is None:
+            lan = try_lan_page(node_name_for(dest_hash_hex), path)
+            if lan:
+                lan["hash"] = dest_hash_hex
+                lan["path"] = path
+                return lan
             return {"ok": False, "error": "Brak tożsamości node'a w RNS — poczekaj na announce"}
 
         try:
@@ -591,15 +625,24 @@ def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> di
                 finish({"ok": False, "error": "Połączenie zamknięte"})
 
         link = RNS.Link(destination, established_callback=established, closed_callback=closed)
-        if not done.wait(timeout + 2):
+        if not done.wait(min(timeout, 8) + 1):
             try:
                 link.teardown()
             except Exception:
                 pass
-            return {"ok": False, "error": "Timeout przy pobieraniu strony"}
-        return dict(result)
+            result.update({"ok": False, "error": "Timeout RNS"})
+        else:
+            if result.get("ok"):
+                return dict(result)
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        result = {"ok": False, "error": str(exc)}
+
+    lan = try_lan_page(node_name_for(dest_hash_hex), path)
+    if lan:
+        lan["hash"] = dest_hash_hex
+        lan["path"] = path
+        return lan
+    return dict(result) if result else {"ok": False, "error": "Timeout przy pobieraniu strony"}
 
 
 def decode_app_data(app_data):
@@ -800,8 +843,7 @@ def start_node_announce():
     )
     ensure_pages()
 
-    def page_response(*args):
-        path = args[0] if args else "/page/index.mu"
+    def page_response(path, request_data, request_id, remote_identity, requested_at):
         print(f"[gateway] żądanie strony {path}")
         try:
             return load_local_page(path or "/page/index.mu").encode("utf-8")
@@ -1487,6 +1529,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
         if path == "/api/nodes":
             self._send(*json_bytes({"ok": True, "nodes": list_nodes()}))
+            return
+
+        if path == "/api/localpage":
+            page = unquote((query.get("path") or ["/page/index.mu"])[0])
+            text = load_local_page(page)
+            self._send(*json_bytes({
+                "ok": True,
+                "path": page,
+                "text": text,
+                "html": micron_to_html(text),
+                "name": host_name(),
+                "source": "local",
+            }))
             return
 
         if path == "/api/page":
