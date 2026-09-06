@@ -530,16 +530,17 @@ def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> di
 
         identity = RNS.Identity.recall(dest_hash)
         if identity is None:
-            text = demo_page(path, dest_hash_hex)
-            return {
-                "ok": True,
-                "hash": dest_hash_hex,
-                "path": path,
-                "text": text,
-                "html": micron_to_html(text),
-                "source": "demo",
-                "note": "Brak tożsamości node'a w pamięci RNS",
-            }
+            return {"ok": False, "error": "Brak tożsamości node'a w RNS — poczekaj na announce"}
+
+        try:
+            dest_hash = RNS.Destination.hash_from_name_and_identity("nomadnetwork.node", identity)
+        except Exception:
+            pass
+        if not RNS.Transport.has_path(dest_hash):
+            RNS.Transport.request_path(dest_hash)
+            deadline = time.time() + min(timeout, 12)
+            while time.time() < deadline and not RNS.Transport.has_path(dest_hash):
+                time.sleep(0.2)
 
         destination = RNS.Destination(
             identity,
@@ -550,6 +551,7 @@ def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> di
         )
 
         def established(link):
+            print(f"[gateway] link OK, biorę {path}")
             def got_response(request_receipt):
                 body = request_receipt.response
                 if body is None:
@@ -574,7 +576,7 @@ def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> di
                 )
 
             def failed(_receipt=None):
-                finish({"ok": False, "error": "Node nie oddał strony"})
+                finish({"ok": False, "error": "Node nie oddał strony (brak handlera /page/index.mu?)"})
 
             link.request(
                 path,
@@ -705,8 +707,8 @@ def start_rns() -> None:
         print("[gateway] RNS włączony, czekam na announce")
         harvest_known_paths()
         threading.Thread(target=path_harvester, daemon=True).start()
-        start_lxmf()
         start_node_announce()
+        start_lxmf()
     except Exception as exc:
         print(f"[gateway] Handler announce nie wszedł ({exc})")
         reticulum = reticulum  # keep instance alive
@@ -722,12 +724,7 @@ def start_lxmf():
         return
     try:
         os.makedirs(LXMF_DIR, exist_ok=True)
-        ident_path = os.path.join(LXMF_DIR, "identity")
-        if os.path.exists(ident_path):
-            identity = RNS.Identity.from_file(ident_path)
-        else:
-            identity = RNS.Identity()
-            identity.to_file(ident_path)
+        identity = node_identity or load_node_identity()
         lxmf_router = LXMF.LXMRouter(storagepath=LXMF_DIR)
         lxmf_source = lxmf_router.register_delivery_identity(identity, display_name=device_name)
         lxmf_address = hexhash(lxmf_source.hash)
@@ -765,10 +762,25 @@ def announce_on_all(dest, app_data):
                 break
             except Exception as exc:
                 print(f"[gateway] announce na {iface}: {exc}")
-    if sent == 0:
+    try:
         dest.announce(app_data=app_data)
-        sent = 1
+        sent = max(sent, 1)
+    except Exception as exc:
+        print(f"[gateway] announce ogólny: {exc}")
     return sent
+
+
+def load_node_identity():
+    global node_identity
+    import RNS
+    ident_path = os.path.expanduser("~/.reticulum-gateway/identity")
+    os.makedirs(os.path.dirname(ident_path), exist_ok=True)
+    if os.path.exists(ident_path):
+        node_identity = RNS.Identity.from_file(ident_path)
+    else:
+        node_identity = RNS.Identity()
+        node_identity.to_file(ident_path)
+    return node_identity
 
 
 def start_node_announce():
@@ -778,13 +790,7 @@ def start_node_announce():
     except Exception:
         return
     device_name = host_name()
-    ident_path = os.path.expanduser("~/.reticulum-gateway/identity")
-    os.makedirs(os.path.dirname(ident_path), exist_ok=True)
-    if os.path.exists(ident_path):
-        node_identity = RNS.Identity.from_file(ident_path)
-    else:
-        node_identity = RNS.Identity()
-        node_identity.to_file(ident_path)
+    node_identity = load_node_identity()
     node_dest = RNS.Destination(
         node_identity,
         RNS.Destination.IN,
@@ -794,26 +800,42 @@ def start_node_announce():
     )
     ensure_pages()
 
-    def page_response(path, data, request_id, link_id, remote_identity, requested_at):
+    def page_response(*args):
+        path = args[0] if args else "/page/index.mu"
+        print(f"[gateway] żądanie strony {path}")
         try:
             return load_local_page(path or "/page/index.mu").encode("utf-8")
         except Exception as exc:
+            print(f"[gateway] strona {exc}")
             return f"`!blad`` {exc}".encode("utf-8")
 
     def link_in(link):
         print("[gateway] link przychodzący po stronę")
+        try:
+            link.set_link_closed_callback(lambda _l: None)
+        except Exception:
+            pass
 
     try:
         node_dest.set_link_established_callback(link_in)
     except Exception as exc:
         print(f"[gateway] callback linku: {exc}")
-    allow = getattr(RNS.Destination, "ALLOW_ALL", None)
-    for prefix in ("/page", "/page/", "/page/index.mu", "/"):
+    allow = getattr(RNS.Destination, "ALLOW_ALL", 0)
+    paths = ["/page/index.mu"]
+    try:
+        for name in os.listdir(PAGES_DIR):
+            if name.endswith(".mu"):
+                p = "/page/" + name
+                if p not in paths:
+                    paths.append(p)
+    except Exception:
+        pass
+    for prefix in paths:
         try:
-            kwargs = {"response_generator": page_response}
-            if allow is not None:
-                kwargs["allow"] = allow
-            node_dest.register_request_handler(prefix, **kwargs)
+            node_dest.register_request_handler(
+                prefix, response_generator=page_response, allow=allow,
+            )
+            print(f"[gateway] serwuję {prefix}")
         except Exception as exc:
             print(f"[gateway] handler {prefix}: {exc}")
     app = device_name.encode("utf-8")
