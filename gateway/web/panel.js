@@ -1,369 +1,84 @@
-const $app = document.getElementById("app");
-const $addr = document.getElementById("addr");
-const live = { nodes: {}, conv: [], unsub: [] };
 
 function route() {
   return decodeURIComponent((location.hash || "#/home").replace(/^#\/?/, "")) || "home";
 }
-function go(p) {
-  location.hash = "#/" + String(p).replace(/^#\/?/, "").replace(/^reticulum:\/\//, "");
-}
-async function api(path, init) {
-  const res = await fetch(path, { cache: "no-store", ...init });
-  return res.json();
-}
-function esc(s) {
-  return String(s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
-function age(sec) {
-  sec = Number(sec || 0);
-  if (sec < 60) return sec + "s";
-  if (sec < 3600) return Math.floor(sec / 60) + "m";
-  if (sec < 86400) return Math.floor(sec / 3600) + "h";
-  return Math.floor(sec / 86400) + "d";
-}
-function markTabs() {
-  const p = route().split("/")[0] || "home";
-  const map = { home: "goHome", nodes: "goNodes", node: "goNodes", msg: "goMsg", messages: "goMsg", networks: "goNets" };
-  ["goNodes", "goMsg", "goNets"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.classList.toggle("on", map[p] === id);
-  });
-}
-function onLive(fn) { live.unsub.push(fn); }
-function startSse() {
-  if (live.es) return;
-  try {
-    live.es = new EventSource("/api/stream");
-    live.es.onmessage = (ev) => {
-      let data;
-      try { data = JSON.parse(ev.data); } catch { return; }
-      if (data.type === "hello" && data.nodes) {
-        data.nodes.forEach((n) => { if (n.hash) live.nodes[n.hash] = n; });
-      }
-      if (data.type === "node" && data.node && data.node.hash) live.nodes[data.node.hash] = data.node;
-      if (data.type === "lxmf" && data.conversations) live.conv = data.conversations;
-      live.unsub.forEach((fn) => { try { fn(data); } catch {} });
-    };
-  } catch (e) {}
-}
-
-async function render() {
-  live.unsub = [];
-  const path = route();
-  $addr.value = path;
-  document.body.classList.remove("chat-on");
-  markTabs();
-  if (path === "home" || path === "") return home();
-  if (path === "networks") return networks();
-  if (path === "nodes") return nodes();
-  if (path === "msg" || path === "messages") return inbox();
-  if (path.startsWith("msg/")) return thread(path.slice(4).split("/")[0]);
-  if (path.startsWith("lxmf@")) return thread(path.slice(5));
-  if (path.startsWith("node/")) return page(path.slice(5));
-  return alias(path);
-}
-
-async function home() {
-  const data = await api("/api/data").catch(() => ({ aliases: {}, history: [] }));
-  const aliases = data.aliases || {};
-  const history = data.history || [];
-  const ncount = Object.keys(live.nodes).length;
-  $app.innerHTML = `
-    <h1>Gateway</h1>
-    <p class="muted"><span class="live" id="dot"></span>Mesh on this device. The node list updates as announces arrive.</p>
-    <div class="row" style="margin:14px 0 6px">
-      <button class="act" type="button" id="toNodes">Browse nodes${ncount ? " · " + ncount : ""}</button>
-      <button class="ghost" type="button" id="toMsg">Messages</button>
-      <button class="ghost" type="button" id="toNets">Networks</button>
-    </div>
-    <h2>Aliases</h2>
-    <div>${Object.keys(aliases).length ? Object.entries(aliases).map(([n, a]) => `
-      <div class="card spread"><div><h3>${esc(n)}</h3><div class="hash">${esc(a.hash)}</div></div>
-      <button class="ghost small" data-go="${esc(n)}">Open</button></div>`).join("") : `<p class="muted">None yet. Save an alias from a node page.</p>`}</div>
-    <h2>History</h2>
-    <div>${history.length ? history.map((h) => `
-      <div class="card spread"><div>${esc(h.title || h.url)}<div class="hash">${esc(h.url)}</div></div>
-      <button class="ghost small" data-go="${esc(h.url)}">Open</button></div>`).join("") : `<p class="muted">Empty.</p>`}</div>`;
-  $app.querySelector("#toNodes").onclick = () => go("nodes");
-  $app.querySelector("#toMsg").onclick = () => go("msg");
-  $app.querySelector("#toNets").onclick = () => go("networks");
-  $app.querySelectorAll("[data-go]").forEach((b) => { b.onclick = () => go(b.dataset.go); });
-}
-
-async function networks() {
-  const info = await api("/api/networks").catch(() => null);
-  if (!info || !info.presets) {
-    $app.innerHTML = `<p class="warn">Could not load networks.</p>`;
-    return;
+function viewUrl(path) {
+  path = path || route();
+  if (path === "home" || path === "") return "/ui/home";
+  if (path === "networks") return "/ui/networks";
+  if (path === "nodes") return "/ui/nodes";
+  if (path === "msg" || path === "messages") return "/ui/inbox";
+  if (path.startsWith("msg/")) return "/ui/thread?peer=" + encodeURIComponent(path.slice(4).split("/")[0]);
+  if (path.startsWith("lxmf@")) return "/ui/thread?peer=" + encodeURIComponent(path.slice(5));
+  if (path.startsWith("node/")) {
+    const rest = path.slice(5);
+    const m = rest.match(/^([a-fA-F0-9]{32})(\/.*)?$/);
+    if (!m) return "/ui/home";
+    return "/ui/page?hash=" + m[1].toLowerCase() + "&path=" + encodeURIComponent(m[2] || "/page/index.mu");
   }
-  $app.innerHTML = `
-    <h1>Networks</h1>
-    <p class="muted">Interfaces written to the Reticulum config on this Pi.</p>
-    <div id="presets">${info.presets.map((p) => `
-      <label class="card spread"><div><h3>${esc(p.title)}${p.recommended ? " · recommended" : ""}</h3>
-      <p class="muted">${esc(p.hint)}</p></div>
-      <input type="checkbox" data-id="${esc(p.id)}" ${p.enabled ? "checked" : ""}></label>`).join("")}</div>
-    <h2>Custom TCP hub</h2>
-    <div class="row">
-      <input class="field" id="cHost" placeholder="host">
-      <input class="field" id="cPort" placeholder="4242" style="max-width:90px">
-    </div>
-    <div class="row" style="margin-top:12px">
-      <button class="act" type="button" id="save">Save and connect</button>
-      <span class="muted" id="info"></span>
-    </div>`;
-  $app.querySelector("#save").onclick = async () => {
-    const enabled = [...$app.querySelectorAll("input[type=checkbox]:checked")].map((el) => el.dataset.id);
-    const host = $app.querySelector("#cHost").value.trim();
-    const custom = host ? [{ host, port: $app.querySelector("#cPort").value.trim() || "4242" }] : [];
-    $app.querySelector("#info").textContent = "Saving…";
-    const out = await api("/api/networks", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ enabled, custom }),
-    });
-    $app.querySelector("#info").textContent = out.ok ? "Gateway restarting. Refresh in 5 s." : (out.error || "Error");
-    if (out.ok) setTimeout(() => go("nodes"), 5000);
-  };
+  return "/ui/home";
 }
-
-function nodeCard(n) {
-  const kind = (n.app || "").replace("nomadnetwork.node", "page").replace("lxmf.delivery", "lxmf");
-  return `<article class="card node" data-h="${esc(n.hash)}" data-app="${esc(n.app || "")}">
-    <h3>${esc(n.name || n.hash.slice(0, 8))}</h3>
-    <div class="hash">${esc(n.hash)}</div>
-    <div class="meta"><span class="badge">${esc(kind)}</span><span>${age(n.age)} ago</span></div>
-  </article>`;
+function load() {
+  const path = route();
+  const addr = document.getElementById("addr");
+  if (addr) addr.value = path;
+  document.body.classList.toggle("chat-on", path.startsWith("msg/") || path.startsWith("lxmf@"));
+  document.querySelectorAll("nav.tabs a").forEach((a) => {
+    const href = a.getAttribute("href") || "";
+    const top = path.split("/")[0];
+    a.classList.toggle("on", href === "#/" + top || (path.startsWith("node/") && href === "#/nodes") || (path.startsWith("msg") && href === "#/msg"));
+  });
+  if (window.htmx) htmx.ajax("GET", viewUrl(path), { target: "#app", swap: "innerHTML" });
 }
-
-async function nodes() {
-  const data = await api("/api/nodes").catch(() => ({ nodes: [] }));
-  (data.nodes || []).forEach((n) => { live.nodes[n.hash] = n; });
-  $app.innerHTML = `
-    <h1>Nodes</h1>
-    <p class="muted" id="st"><span class="live"></span>Live list from announces</p>
-    <input class="field search" id="f" placeholder="Filter by name, hash or type">
-    <div class="nodes" id="list"></div>`;
-  const paint = () => {
-    const q = ($app.querySelector("#f").value || "").trim().toLowerCase();
-    const all = Object.values(live.nodes);
-    const show = all.filter((n) => !q || (n.name || "").toLowerCase().includes(q) || (n.hash || "").includes(q) || (n.app || "").toLowerCase().includes(q));
-    show.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-    $app.querySelector("#st").innerHTML = `<span class="live"></span>${all.length} announced`;
-    $app.querySelector("#list").innerHTML = show.length ? show.map(nodeCard).join("") : `<p class="muted">No nodes yet. Enable a network and wait for announces.</p>`;
-    $app.querySelectorAll(".node").forEach((el) => {
-      el.onclick = () => {
-        const h = el.dataset.h;
-        if ((el.dataset.app || "").indexOf("lxmf") >= 0) go("msg/" + h);
-        else go("node/" + h + "/page/index.mu");
-      };
-    });
-  };
-  $app.querySelector("#f").oninput = paint;
-  paint();
-  onLive((ev) => { if (!ev || ev.type === "node" || ev.type === "hello") paint(); });
+function openPeer(ev) {
+  ev.preventDefault();
+  const v = (document.getElementById("newTo") || {}).value || "";
+  const m = v.match(/([a-fA-F0-9]{32})/i);
+  if (m) location.hash = "#/msg/" + m[1].toLowerCase();
 }
-
-async function page(rest) {
-  const m = rest.match(/^([a-fA-F0-9]{32})(\/.*)?$/);
-  if (!m) { $app.innerHTML = `<p class="warn">Invalid address.</p>`; return; }
-  const hash = m[1].toLowerCase();
-  const pth = m[2] || "/page/index.mu";
-  $app.innerHTML = `<p class="muted">Loading page…</p>`;
-  const data = await api("/api/page?hash=" + encodeURIComponent(hash) + "&path=" + encodeURIComponent(pth));
-  await api("/api/data", {
+function saveAlias(hash, path) {
+  const name = prompt("Short name, e.g. forum");
+  if (!name) return;
+  const key = name.trim().toLowerCase().replace(/\s+/g, "-");
+  fetch("/api/data", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ history: { url: "node/" + hash + pth, title: hash.slice(0, 8) + pth, hash, path: pth } }),
+    body: JSON.stringify({ alias: { name: key, hash, path, title: name.trim() } }),
+  }).then(() => alert("reticulum://" + key));
+}
+document.addEventListener("DOMContentLoaded", () => {
+  const form = document.getElementById("addrForm");
+  if (form) form.onsubmit = (e) => {
+    e.preventDefault();
+    location.hash = "#/" + (document.getElementById("addr").value.trim() || "home");
+  };
+  load();
+});
+window.addEventListener("hashchange", load);
+fetch("/api/version").then((r) => r.json()).then((v) => {
+  return fetch("/api/hello").then((r) => r.json()).then((hello) => {
+    const el = document.getElementById("ver");
+    if (el) el.textContent = [hello.name || "", v.label || ""].filter(Boolean).join(" · ");
   });
-  if (!data.ok && !data.html && !data.text) {
-    $app.innerHTML = `<p class="warn">${esc(data.error || "Error")}</p>`;
+}).catch(() => {});
+document.body.addEventListener("click", (e) => {
+  const a = e.target.closest(".page a");
+  if (!a) return;
+  const href = a.getAttribute("href") || "";
+  if (href.startsWith("http") || href.startsWith("mailto:")) return;
+  e.preventDefault();
+  const cur = route();
+  const m = cur.match(/^node\/([a-fA-F0-9]{32})/);
+  const hash = m ? m[1] : "";
+  const raw = href.replace(/^nomadnetwork:\/\//, "");
+  if (/lxmf@/i.test(raw) || raw.startsWith("#/msg/")) {
+    const p = (raw.match(/([a-fA-F0-9]{32})/) || [])[1];
+    if (p) location.hash = "#/msg/" + p.toLowerCase();
     return;
   }
-  $app.innerHTML = `
-    <div class="spread"><div><h1>${esc((live.nodes[hash] && live.nodes[hash].name) || hash.slice(0, 8))}</h1>
-    <div class="hash">${esc(hash + pth)}</div></div>
-    <button class="ghost small" id="alias">Save alias</button></div>
-    <div class="card page" id="body">${data.html || "<pre>" + esc(data.text || "") + "</pre>"}</div>`;
-  $app.querySelector("#alias").onclick = async () => {
-    const name = prompt("Short name, e.g. forum");
-    if (!name) return;
-    const key = name.trim().toLowerCase().replace(/\s+/g, "-");
-    await api("/api/data", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ alias: { name: key, hash, path: pth, title: name.trim() } }),
-    });
-    alert("reticulum://" + key);
-  };
-  $app.querySelector("#body").onclick = (e) => {
-    const a = e.target.closest("a");
-    if (!a) return;
-    e.preventDefault();
-    openMesh(a.getAttribute("href") || "", hash);
-  };
-}
-
-function lxmfPeer(s) {
-  const m = String(s || "").match(/lxmf@([a-fA-F0-9]{32})/i) || String(s || "").match(/^([a-fA-F0-9]{32})$/);
-  return m ? m[1].toLowerCase() : "";
-}
-
-function openMesh(href, currentHash) {
-  const h = String(href || "").trim();
-  if (h.startsWith("#/")) { go(h.slice(2)); return; }
-  const fromMsg = h.match(/(?:msg\/|lxmf@)([a-fA-F0-9]{32})/i);
-  const peer = lxmfPeer(h) || (fromMsg && fromMsg[1].toLowerCase());
-  if (peer && peer.length === 32) { go("msg/" + peer); return; }
-  let hash = currentHash;
-  let path = "/page/index.mu";
-  const raw = h.replace(/^nomadnetwork:\/\//, "").replace(/^https?:\/\/[^/]+\//, "");
-  if (raw.startsWith(":/")) path = raw.slice(1);
+  if (raw.startsWith(":/")) location.hash = "#/node/" + hash + raw.slice(1);
   else if (raw.includes(":")) {
     const i = raw.indexOf(":");
-    hash = raw.slice(0, i).replace(/[<>]/g, "");
-    path = raw.slice(i + 1) || "/page/index.mu";
-  } else if (/^[a-fA-F0-9]{32}$/.test(raw)) hash = raw;
-  else if (raw.startsWith("/")) path = raw;
-  if (!path.startsWith("/")) path = "/" + path;
-  go("node/" + hash + path);
-}
-
-async function alias(path) {
-  const data = await api("/api/data").catch(() => ({ aliases: {} }));
-  const key = path.split("/")[0];
-  const a = (data.aliases || {})[key];
-  if (!a) {
-    $app.innerHTML = `<div class="card"><h1>Not found</h1><p class="muted">${esc(path)}</p></div>`;
-    return;
-  }
-  const rest = path.includes("/") ? path.slice(path.indexOf("/")) : a.path || "/page/index.mu";
-  go("node/" + a.hash + (rest.startsWith("/") ? rest : "/" + rest));
-}
-
-async function inbox() {
-  const data = await api("/api/lxmf").catch(() => ({ conversations: [] }));
-  live.conv = data.conversations || [];
-  const paint = () => {
-    const box = $app.querySelector("#list");
-    if (!box) return;
-    const list = live.conv || [];
-    box.innerHTML = list.length ? list.map((c) => `
-      <div class="card spread node" data-p="${esc(c.peer)}"><div><h3>${esc(c.name)}</h3>
-      <div class="hash">${esc(c.peer)}</div><div class="muted">${esc(c.last)}</div></div>
-      <span class="badge">${c.count || 0}</span></div>`).join("") : `<p class="muted">No threads. Open a Contact me link or paste an LXMF hash.</p>`;
-    box.querySelectorAll("[data-p]").forEach((b) => { b.onclick = () => go("msg/" + b.dataset.p); });
-  };
-  $app.innerHTML = `
-    <h1>Messages</h1>
-    <p class="muted">${data.lxmf ? "Your LXMF address: " + esc(data.me || "") : "LXMF is off. On the Pi: pip install lxmf and restart."}</p>
-    <div class="row">
-      <input class="field" id="newTo" placeholder="lxmf@… or hash" style="max-width:360px">
-      <button class="act" type="button" id="openTo">Open</button>
-    </div>
-    <div id="list"></div>`;
-  $app.querySelector("#openTo").onclick = () => {
-    const p = lxmfPeer($app.querySelector("#newTo").value.trim()) || $app.querySelector("#newTo").value.replace(/lxmf@/gi, "").trim();
-    if (p) go("msg/" + p);
-  };
-  paint();
-  onLive((ev) => { if (ev && ev.type === "lxmf") paint(); });
-}
-
-function bubbleHtml(m) {
-  const t = m.ts ? new Date(m.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
-  return `<div class="bubble ${m.dir === "out" ? "out" : "in"}">
-    ${m.title ? `<div class="muted">${esc(m.title)}</div>` : ""}
-    <div>${esc(m.text)}</div>
-    <div class="meta">${esc(t)}${m.status && m.status !== "ok" && m.status !== "sent" ? " · " + esc(m.status) : ""}</div>
-  </div>`;
-}
-
-async function thread(peer) {
-  peer = String(peer || "").toLowerCase().replace(/lxmf@/g, "").replace(/[^a-f0-9]/g, "");
-  if (peer.length !== 32) {
-    $app.innerHTML = `<p class="warn">Invalid LXMF address.</p>`;
-    return;
-  }
-  document.body.classList.add("chat-on");
-  $app.innerHTML = `
-    <div class="chat-app">
-      <div class="chat-head">
-        <button class="ghost small" id="back" type="button">←</button>
-        <div>
-          <h1>${esc(peer.slice(0, 8))}</h1>
-          <div class="hash">${esc(peer)}</div>
-        </div>
-      </div>
-      <div class="chat" id="chat"><p class="muted">Opening…</p></div>
-      <form class="composer" id="form">
-        <input class="field" id="box" autocomplete="off" placeholder="Message">
-        <button class="act" type="submit">Send</button>
-      </form>
-      <p class="muted" id="st"></p>
-    </div>`;
-  $app.querySelector("#back").onclick = () => go("msg");
-  const box = $app.querySelector("#box");
-  box.focus();
-  let messages = [];
-  const paint = () => {
-    const el = $app.querySelector("#chat");
-    if (!el) return;
-    if (!messages.length) el.innerHTML = `<p class="muted">Live thread. Incoming LXMF appears here.</p>`;
-    else {
-      el.innerHTML = messages.map(bubbleHtml).join("");
-      el.scrollTop = el.scrollHeight;
-    }
-  };
-  try {
-    const data = await api("/api/lxmf?peer=" + encodeURIComponent(peer));
-    messages = data.messages || [];
-  } catch (e) {}
-  paint();
-  onLive((ev) => {
-    if (!ev || ev.type !== "lxmf" || ev.peer !== peer || !ev.message) return;
-    messages.push(ev.message);
-    paint();
-  });
-  $app.querySelector("#form").onsubmit = async (e) => {
-    e.preventDefault();
-    const text = box.value.trim();
-    if (!text) return;
-    box.value = "";
-    messages.push({ dir: "out", text, title: "", ts: Date.now() / 1000, status: "…" });
-    paint();
-    const out = await api("/api/lxmf", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ to: peer, text }),
-    }).catch(() => ({ ok: false, error: "No connection to the gateway" }));
-    if (!out.ok) $app.querySelector("#st").textContent = out.error || "Send failed";
-    const fresh = await api("/api/lxmf?peer=" + encodeURIComponent(peer)).catch(() => ({ messages }));
-    messages = fresh.messages || messages;
-    paint();
-    box.focus();
-  };
-}
-
-document.getElementById("goHome").onclick = () => go("home");
-document.getElementById("goNodes").onclick = () => go("nodes");
-document.getElementById("goMsg").onclick = () => go("msg");
-document.getElementById("goNets").onclick = () => go("networks");
-document.getElementById("addrForm").onsubmit = (e) => { e.preventDefault(); go($addr.value.trim() || "home"); };
-window.addEventListener("hashchange", render);
-startSse();
-render();
-(async function stamp() {
-  const el = document.getElementById("ver");
-  if (!el) return;
-  try {
-    const [v, h] = await Promise.all([
-      fetch("/api/version", { cache: "no-store" }).then((r) => r.json()),
-      fetch("/api/hello", { cache: "no-store" }).then((r) => r.json()),
-    ]);
-    el.textContent = [h.name || "", v.label || ""].filter(Boolean).join(" · ") || "—";
-  } catch (e) {
-    el.textContent = "—";
-  }
-})();
+    location.hash = "#/node/" + raw.slice(0, i) + (raw.slice(i + 1) || "/page/index.mu");
+  } else if (raw.startsWith("/")) location.hash = "#/node/" + hash + raw;
+});

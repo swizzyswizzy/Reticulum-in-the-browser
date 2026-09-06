@@ -1377,11 +1377,227 @@ class DualHTTPServer(ThreadingHTTPServer):
     pass
 
 
+def h(s):
+    import html as H
+    return H.escape(str(s or ""))
+
+
+def age_label(sec):
+    sec = int(sec or 0)
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m"
+    if sec < 86400:
+        return f"{sec // 3600}h"
+    return f"{sec // 86400}d"
+
+
+def ui_home():
+    data = load_store()
+    aliases = data.get("aliases") or {}
+    history = data.get("history") or []
+    n = len(list_nodes())
+    al = "".join(
+        f'<div class="card spread"><div><h3>{h(k)}</h3><div class="hash">{h(a.get("hash"))}</div></div>'
+        f'<a class="ghost small" href="#/{h(k)}">Open</a></div>'
+        for k, a in aliases.items()
+    ) or '<p class="muted">None yet.</p>'
+    hist = "".join(
+        f'<div class="card spread"><div>{h(x.get("title") or x.get("url"))}<div class="hash">{h(x.get("url"))}</div></div>'
+        f'<a class="ghost small" href="#/{h(x.get("url"))}">Open</a></div>'
+        for x in history
+    ) or '<p class="muted">Empty.</p>'
+    return f"""
+    <h1>Gateway</h1>
+    <p class="muted">Mesh on this device.</p>
+    <div class="row" style="margin:14px 0">
+      <a class="act" href="#/nodes">Browse nodes · {n}</a>
+      <a class="ghost" href="#/msg">Messages</a>
+      <a class="ghost" href="#/networks">Networks</a>
+    </div>
+    <h2>Aliases</h2>{al}
+    <h2>History</h2>{hist}
+    """
+
+
+def node_kind(n):
+    app = (n.get("app") or "").lower()
+    if "lxmf" in app:
+        return "lxmf"
+    if "nomadnetwork" in app or app.endswith(".node"):
+        return "page"
+    return "announce"
+
+
+def ui_nodes(q="", kind="all"):
+    q = (q or "").strip().lower()
+    kind = (kind or "all").lower()
+    if kind not in ("all", "page", "lxmf", "announce"):
+        kind = "all"
+    items = list_nodes()
+    counts = {"all": len(items), "page": 0, "lxmf": 0, "announce": 0}
+    for n in items:
+        counts[node_kind(n)] += 1
+    show = []
+    for n in items:
+        k = node_kind(n)
+        if kind != "all" and k != kind:
+            continue
+        blob = f"{n.get('name','')} {n.get('hash','')} {n.get('app','')}".lower()
+        if q and q not in blob:
+            continue
+        show.append((k, n))
+    cards = []
+    for k, n in show:
+        if k == "lxmf":
+            href = f"#/msg/{n['hash']}"
+        elif k == "page":
+            href = f"#/node/{n['hash']}/page/index.mu"
+        else:
+            href = f"#/node/{n['hash']}/page/index.mu"
+        cards.append(
+            f'<a class="card node" href="{href}"><h3>{h(n.get("name") or n["hash"][:8])}</h3>'
+            f'<div class="hash">{h(n["hash"])}</div>'
+            f'<div class="meta"><span class="badge">{k}</span><span>{age_label(n.get("age"))} ago</span></div></a>'
+        )
+    empty = {
+        "page": "No hosted pages yet.",
+        "lxmf": "No LXMF addresses announced yet.",
+        "announce": "No raw announces yet.",
+        "all": "Nothing announced yet. Enable a network first.",
+    }[kind]
+    body = "".join(cards) or f'<p class="muted">{empty}</p>'
+    chips = []
+    for key, label in (("all", "All"), ("page", "Pages"), ("lxmf", "LXMF"), ("announce", "Announces")):
+        on = " on" if key == kind else ""
+        chips.append(
+            f'<a class="chip{on}" href="#/nodes" hx-get="/ui/nodes?kind={key}&q={h(q)}" hx-target="#app">{label} · {counts[key]}</a>'
+        )
+    return f"""
+    <h1>Nodes</h1>
+    <div class="filters">{''.join(chips)}</div>
+    <form class="search-form" hx-get="/ui/nodes" hx-target="#app" hx-push-url="false">
+      <input type="hidden" name="kind" value="{h(kind)}">
+      <input class="field search" name="q" value="{h(q)}" placeholder="Filter name or hash"
+        hx-get="/ui/nodes" hx-target="#app" hx-trigger="keyup changed delay:300ms" hx-include="closest form">
+    </form>
+    <div class="nodes">{body}</div>
+    """
+
+
+def ui_networks():
+    info = list_network_state()
+    presets = "".join(
+        f'<label class="card spread"><div><h3>{h(p.get("title"))}'
+        f'{" · recommended" if p.get("recommended") else ""}</h3>'
+        f'<p class="muted">{h(p.get("hint"))}</p></div>'
+        f'<input type="checkbox" name="enabled" value="{h(p.get("id"))}" '
+        f'{"checked" if p.get("enabled") else ""}></label>'
+        for p in info.get("presets") or []
+    )
+    return f"""
+    <h1>Networks</h1>
+    <p class="muted">Written to the Reticulum config on this Pi.</p>
+    <form hx-post="/ui/networks" hx-target="#app" hx-swap="innerHTML">
+      {presets}
+      <h2>Custom TCP hub</h2>
+      <div class="row">
+        <input class="field" name="host" placeholder="host">
+        <input class="field" name="port" placeholder="4242" style="max-width:90px">
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="act" type="submit">Save and connect</button>
+      </div>
+    </form>
+    """
+
+
+def ui_inbox():
+    conv = list_conversations()
+    rows = "".join(
+        f'<a class="card spread node" href="#/msg/{h(c["peer"])}"><div><h3>{h(c.get("name"))}</h3>'
+        f'<div class="hash">{h(c.get("peer"))}</div><div class="muted">{h(c.get("last"))}</div></div>'
+        f'<span class="badge">{c.get("count") or 0}</span></a>'
+        for c in conv
+    ) or '<p class="muted">No threads. Paste an LXMF hash below.</p>'
+    me = lxmf_address or ""
+    note = f"Your LXMF address: {h(me)}" if lxmf_ok else "LXMF is off."
+    return f"""
+    <h1>Messages</h1>
+    <p class="muted">{note}</p>
+    <form class="row" onsubmit="openPeer(event)">
+      <input class="field" id="newTo" placeholder="lxmf@… or hash" style="max-width:360px">
+      <button class="act" type="submit">Open</button>
+    </form>
+    <div id="list">{rows}</div>
+    """
+
+
+def ui_thread(peer, inner_only=False):
+    peer = str(peer or "").lower().replace("lxmf@", "")
+    peer = "".join(c for c in peer if c in "0123456789abcdef")
+    if len(peer) != 32:
+        return '<p class="warn">Invalid LXMF address.</p>'
+    store = load_msgs()
+    msgs = (store.get("peers") or {}).get(peer, {}).get("messages") or []
+    if msgs:
+        bubbles = []
+        for m in msgs:
+            side = "out" if m.get("dir") == "out" else "in"
+            ts = m.get("ts")
+            clock = time.strftime("%H:%M", time.localtime(ts)) if ts else ""
+            st = m.get("status") or ""
+            extra = f" · {h(st)}" if st and st not in ("ok", "sent") else ""
+            title = f'<div class="muted">{h(m.get("title"))}</div>' if m.get("title") else ""
+            bubbles.append(
+                f'<div class="bubble {side}">{title}<div>{h(m.get("text"))}</div>'
+                f'<div class="meta">{h(clock)}{extra}</div></div>'
+            )
+        chat = "".join(bubbles)
+    else:
+        chat = '<p class="muted">Live thread. Incoming LXMF appears here.</p>'
+    if inner_only:
+        return chat
+    return f"""
+    <div class="chat-app">
+      <div class="chat-head">
+        <a class="ghost small" href="#/msg">←</a>
+        <div><h1>{h(peer[:8])}</h1><div class="hash">{h(peer)}</div></div>
+      </div>
+      <div class="chat" id="chat" hx-get="/ui/thread-body?peer={h(peer)}" hx-trigger="every 2s" hx-swap="innerHTML">{chat}</div>
+      <form class="composer" hx-post="/ui/send" hx-target="#chat" hx-swap="innerHTML" hx-on::after-request="this.reset()">
+        <input type="hidden" name="peer" value="{h(peer)}">
+        <input class="field" name="text" autocomplete="off" placeholder="Message">
+        <button class="act" type="submit">Send</button>
+      </form>
+    </div>
+    """
+
+
+def ui_page(dest, path):
+    dest = (dest or "").strip().lower()
+    path = path or "/page/index.mu"
+    data = fetch_nomad_page(dest, path)
+    if not data.get("ok") and not data.get("html") and not data.get("text"):
+        return f'<p class="warn">{h(data.get("error") or "Error")}</p>'
+    body = data.get("html") or f"<pre>{h(data.get('text'))}</pre>"
+    name = dest[:8]
+    with nodes_lock:
+        n = nodes.get(dest) or {}
+        name = n.get("name") or name
+    return f"""
+    <div class="spread"><div><h1>{h(name)}</h1><div class="hash">{h(dest + path)}</div></div>
+    <button class="ghost small" type="button" onclick="saveAlias('{h(dest)}','{h(path)}')">Save alias</button></div>
+    <div class="card page" id="body">{body}</div>
+    """
+
+
 def serve_web(path):
     if path in ("/", "/index.html", "/home"):
         path = "/index.html"
     name = os.path.basename(path)
-    if name not in ("index.html", "panel.css", "panel.js"):
+    if name not in ("index.html", "panel.css", "panel.js", "htmx.min.js"):
         return None
     full = os.path.join(WEB_DIR, name)
     if not os.path.isfile(full):
@@ -1425,7 +1641,29 @@ class GatewayHandler(BaseHTTPRequestHandler):
         try:
             body = json.loads(raw.decode("utf-8") or "{}")
         except Exception:
-            self._send(*json_bytes({"ok": False, "error": "Zły JSON"}, 400))
+            body = {}
+            form = parse_qs(raw.decode("utf-8", errors="replace"))
+            body = {k: (v if len(v) > 1 else (v[0] if v else "")) for k, v in form.items()}
+        if parsed.path == "/ui/send":
+            peer = body.get("peer") or ""
+            text = (body.get("text") or "").strip()
+            if text:
+                send_lxmf(peer, text)
+            self._send(200, "text/html; charset=utf-8", ui_thread(peer, inner_only=True).encode("utf-8"))
+            return
+        if parsed.path == "/ui/networks":
+            enabled = body.get("enabled") or []
+            if isinstance(enabled, str):
+                enabled = [enabled]
+            host = (body.get("host") or "").strip()
+            custom = [{"host": host, "port": body.get("port") or "4242"}] if host else []
+            try:
+                apply_networks(enabled, custom)
+                restart_soon()
+            except Exception as exc:
+                self._send(200, "text/html; charset=utf-8", f'<p class="warn">{h(exc)}</p>'.encode())
+                return
+            self._send(200, "text/html; charset=utf-8", b"<p class=\"muted\">Gateway restarting. Refresh in 5 s.</p>")
             return
         if parsed.path == "/api/lxmf":
             to_hex = body.get("to") or body.get("peer") or ""
@@ -1483,6 +1721,24 @@ class GatewayHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
+
+        if path.startswith("/ui/"):
+            if path == "/ui/home":
+                html = ui_home()
+            elif path == "/ui/nodes":
+                html = ui_nodes((query.get("q") or [""])[0], (query.get("kind") or ["all"])[0])
+            elif path == "/ui/networks":
+                html = ui_networks()
+            elif path == "/ui/inbox" or path == "/ui/msg":
+                html = ui_inbox()
+            elif path in ("/ui/thread", "/ui/thread-body"):
+                html = ui_thread((query.get("peer") or [""])[0], inner_only=path.endswith("body"))
+            elif path == "/ui/page":
+                html = ui_page((query.get("hash") or [""])[0], unquote((query.get("path") or ["/page/index.mu"])[0]))
+            else:
+                html = '<p class="warn">Not found</p>'
+            self._send(200, "text/html; charset=utf-8", html.encode("utf-8"))
+            return
 
         if path.startswith("/lxmf@") or path.startswith("/lxmf/"):
             peer = path.split("@")[-1].split("/")[-1]

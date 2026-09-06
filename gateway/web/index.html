@@ -5,22 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Reticulum</title>
   <link rel="stylesheet" href="/panel.css">
+  <script src="/htmx.min.js" defer></script>
+  <script src="/panel.js" defer></script>
 </head>
 <body>
   <header class="top">
-    <div class="brand" id="goHome">RNS</div>
+    <a class="brand" href="#/home">RNS</a>
     <form id="addrForm" class="addr">
       <span class="scheme">reticulum://</span>
       <input id="addr" type="text" spellcheck="false" placeholder="home">
     </form>
     <nav class="tabs">
-      <button type="button" id="goNodes">Nodes</button>
-      <button type="button" id="goMsg">Chat</button>
-      <button type="button" id="goNets">Net</button>
+      <a href="#/nodes">Nodes</a>
+      <a href="#/msg">Chat</a>
+      <a href="#/networks">Net</a>
     </nav>
   </header>
-  <main id="app"></main>
+  <main id="app" hx-get="/ui/home" hx-trigger="load"></main>
   <div id="ver" class="ver"></div>
-  <script src="/panel.js"></script>
 </body>
 </html>
