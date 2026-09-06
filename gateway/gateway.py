@@ -40,6 +40,19 @@ nodes_lock = threading.Lock()
 nodes = {}
 sse_clients = []
 sse_lock = threading.Lock()
+
+
+def push_sse(payload):
+    raw = json.dumps(payload, ensure_ascii=False)
+    with sse_lock:
+        dead = []
+        for q in sse_clients:
+            try:
+                q.append(raw)
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            sse_clients.remove(q)
 rns_ready = False
 demo_mode = False
 device_name = socket.gethostname() or "rNode"
@@ -100,6 +113,12 @@ def add_message(peer, direction, text, title="", status="ok"):
     })
     box["messages"] = box["messages"][-80:]
     save_msgs(store)
+    push_sse({
+        "type": "lxmf",
+        "peer": peer,
+        "message": box["messages"][-1],
+        "conversations": list_conversations(),
+    })
 
 
 def list_conversations():
@@ -136,16 +155,7 @@ def upsert_node(node: dict) -> None:
         prev.update(node)
         prev["last_seen"] = now()
         nodes[h] = prev
-    payload = json.dumps({"type": "node", "node": public_node(nodes[h])})
-    with sse_lock:
-        dead = []
-        for q in sse_clients:
-            try:
-                q.append(payload)
-            except Exception:
-                dead.append(q)
-        for q in dead:
-            sse_clients.remove(q)
+    push_sse({"type": "node", "node": public_node(nodes[h])})
 
 
 def public_node(node: dict) -> dict:

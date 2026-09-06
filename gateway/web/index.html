@@ -8,13 +8,16 @@
 </head>
 <body>
   <header class="top">
-    <div class="brand" id="goHome">Reticulum</div>
+    <div class="brand" id="goHome">RNS</div>
     <form id="addrForm" class="addr">
       <span class="scheme">reticulum://</span>
       <input id="addr" type="text" spellcheck="false" placeholder="home">
     </form>
-    <button type="button" class="ghost" id="goMsg">Messages</button>
-    <button type="button" class="ghost" id="goNets">Networks</button>
+    <nav class="tabs">
+      <button type="button" id="goNodes">Nodes</button>
+      <button type="button" id="goMsg">Chat</button>
+      <button type="button" id="goNets">Net</button>
+    </nav>
   </header>
   <main id="app"></main>
   <div id="ver" class="ver"></div>

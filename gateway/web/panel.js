@@ -1,5 +1,6 @@
 const $app = document.getElementById("app");
 const $addr = document.getElementById("addr");
+const live = { nodes: {}, conv: [], unsub: [] };
 
 function route() {
   return decodeURIComponent((location.hash || "#/home").replace(/^#\/?/, "")) || "home";
@@ -14,11 +15,45 @@ async function api(path, init) {
 function esc(s) {
   return String(s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
+function age(sec) {
+  sec = Number(sec || 0);
+  if (sec < 60) return sec + "s";
+  if (sec < 3600) return Math.floor(sec / 60) + "m";
+  if (sec < 86400) return Math.floor(sec / 3600) + "h";
+  return Math.floor(sec / 86400) + "d";
+}
+function markTabs() {
+  const p = route().split("/")[0] || "home";
+  const map = { home: "goHome", nodes: "goNodes", node: "goNodes", msg: "goMsg", messages: "goMsg", networks: "goNets" };
+  ["goNodes", "goMsg", "goNets"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle("on", map[p] === id);
+  });
+}
+function onLive(fn) { live.unsub.push(fn); }
+function startSse() {
+  if (live.es) return;
+  try {
+    live.es = new EventSource("/api/stream");
+    live.es.onmessage = (ev) => {
+      let data;
+      try { data = JSON.parse(ev.data); } catch { return; }
+      if (data.type === "hello" && data.nodes) {
+        data.nodes.forEach((n) => { if (n.hash) live.nodes[n.hash] = n; });
+      }
+      if (data.type === "node" && data.node && data.node.hash) live.nodes[data.node.hash] = data.node;
+      if (data.type === "lxmf" && data.conversations) live.conv = data.conversations;
+      live.unsub.forEach((fn) => { try { fn(data); } catch {} });
+    };
+  } catch (e) {}
+}
 
 async function render() {
+  live.unsub = [];
   const path = route();
   $addr.value = path;
   document.body.classList.remove("chat-on");
+  markTabs();
   if (path === "home" || path === "") return home();
   if (path === "networks") return networks();
   if (path === "nodes") return nodes();
@@ -33,18 +68,19 @@ async function home() {
   const data = await api("/api/data").catch(() => ({ aliases: {}, history: [] }));
   const aliases = data.aliases || {};
   const history = data.history || [];
+  const ncount = Object.keys(live.nodes).length;
   $app.innerHTML = `
-    <h1>Panel</h1>
-    <p class="muted">This device is the gateway. Nothing else needs installing.</p>
-    <div class="row">
-      <button type="button" id="toNodes">Announced nodes</button>
-      <button type="button" id="toMsg">Messages</button>
-      <button type="button" id="toNets">Networks</button>
+    <h1>Gateway</h1>
+    <p class="muted"><span class="live" id="dot"></span>Mesh on this device. The node list updates as announces arrive.</p>
+    <div class="row" style="margin:14px 0 6px">
+      <button class="act" type="button" id="toNodes">Browse nodes${ncount ? " · " + ncount : ""}</button>
+      <button class="ghost" type="button" id="toMsg">Messages</button>
+      <button class="ghost" type="button" id="toNets">Networks</button>
     </div>
     <h2>Aliases</h2>
-    <div id="al">${Object.keys(aliases).length ? Object.entries(aliases).map(([n, a]) => `
+    <div>${Object.keys(aliases).length ? Object.entries(aliases).map(([n, a]) => `
       <div class="card spread"><div><h3>${esc(n)}</h3><div class="hash">${esc(a.hash)}</div></div>
-      <button class="small" data-go="${esc(n)}">Open</button></div>`).join("") : `<p class="muted">None yet. Set an alias on a node page.</p>`}</div>
+      <button class="ghost small" data-go="${esc(n)}">Open</button></div>`).join("") : `<p class="muted">None yet. Save an alias from a node page.</p>`}</div>
     <h2>History</h2>
     <div>${history.length ? history.map((h) => `
       <div class="card spread"><div>${esc(h.title || h.url)}<div class="hash">${esc(h.url)}</div></div>
@@ -63,18 +99,18 @@ async function networks() {
   }
   $app.innerHTML = `
     <h1>Networks</h1>
-    <p class="muted">Enable the home mesh and/or a public hub. The old Dublin endpoint is gone.</p>
+    <p class="muted">Interfaces written to the Reticulum config on this Pi.</p>
     <div id="presets">${info.presets.map((p) => `
       <label class="card spread"><div><h3>${esc(p.title)}${p.recommended ? " · recommended" : ""}</h3>
       <p class="muted">${esc(p.hint)}</p></div>
       <input type="checkbox" data-id="${esc(p.id)}" ${p.enabled ? "checked" : ""}></label>`).join("")}</div>
-    <h2>Custom server</h2>
+    <h2>Custom TCP hub</h2>
     <div class="row">
       <input class="field" id="cHost" placeholder="host">
       <input class="field" id="cPort" placeholder="4242" style="max-width:90px">
     </div>
     <div class="row" style="margin-top:12px">
-      <button type="button" id="save">Save and connect</button>
+      <button class="act" type="button" id="save">Save and connect</button>
       <span class="muted" id="info"></span>
     </div>`;
   $app.querySelector("#save").onclick = async () => {
@@ -92,26 +128,41 @@ async function networks() {
   };
 }
 
+function nodeCard(n) {
+  const kind = (n.app || "").replace("nomadnetwork.node", "page").replace("lxmf.delivery", "lxmf");
+  return `<article class="card node" data-h="${esc(n.hash)}" data-app="${esc(n.app || "")}">
+    <h3>${esc(n.name || n.hash.slice(0, 8))}</h3>
+    <div class="hash">${esc(n.hash)}</div>
+    <div class="meta"><span class="badge">${esc(kind)}</span><span>${age(n.age)} ago</span></div>
+  </article>`;
+}
+
 async function nodes() {
-  $app.innerHTML = `<h1>Nodes</h1><p class="muted" id="st">Loading…</p><input class="field search" id="f" placeholder="Filter"><div id="list"></div>`;
   const data = await api("/api/nodes").catch(() => ({ nodes: [] }));
-  const all = data.nodes || [];
+  (data.nodes || []).forEach((n) => { live.nodes[n.hash] = n; });
+  $app.innerHTML = `
+    <h1>Nodes</h1>
+    <p class="muted" id="st"><span class="live"></span>Live list from announces</p>
+    <input class="field search" id="f" placeholder="Filter by name, hash or type">
+    <div class="nodes" id="list"></div>`;
   const paint = () => {
-    const q = $app.querySelector("#f").value.trim().toLowerCase();
-    const show = all.filter((n) => !q || (n.name || "").toLowerCase().includes(q) || (n.hash || "").includes(q));
-    $app.querySelector("#st").innerHTML = all.length
-      ? `${all.length} announced`
-      : `Nothing here yet. Open <a href="#/networks">Networks</a> and enable a hub.`;
-    $app.querySelector("#list").innerHTML = show.map((n) => `
-      <div class="card spread"><div><h3>${esc(n.name)}</h3><div class="hash">${esc(n.hash)}</div>
-      <div class="muted">${esc(n.app || "")}</div></div>
-      <button data-h="${esc(n.hash)}">Visit</button></div>`).join("");
-    $app.querySelectorAll("button[data-h]").forEach((b) => {
-      b.onclick = () => go("node/" + b.dataset.h + "/page/index.mu");
+    const q = ($app.querySelector("#f").value || "").trim().toLowerCase();
+    const all = Object.values(live.nodes);
+    const show = all.filter((n) => !q || (n.name || "").toLowerCase().includes(q) || (n.hash || "").includes(q) || (n.app || "").toLowerCase().includes(q));
+    show.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    $app.querySelector("#st").innerHTML = `<span class="live"></span>${all.length} announced`;
+    $app.querySelector("#list").innerHTML = show.length ? show.map(nodeCard).join("") : `<p class="muted">No nodes yet. Enable a network and wait for announces.</p>`;
+    $app.querySelectorAll(".node").forEach((el) => {
+      el.onclick = () => {
+        const h = el.dataset.h;
+        if ((el.dataset.app || "").indexOf("lxmf") >= 0) go("msg/" + h);
+        else go("node/" + h + "/page/index.mu");
+      };
     });
   };
   $app.querySelector("#f").oninput = paint;
   paint();
+  onLive((ev) => { if (!ev || ev.type === "node" || ev.type === "hello") paint(); });
 }
 
 async function page(rest) {
@@ -119,7 +170,7 @@ async function page(rest) {
   if (!m) { $app.innerHTML = `<p class="warn">Invalid address.</p>`; return; }
   const hash = m[1].toLowerCase();
   const pth = m[2] || "/page/index.mu";
-  $app.innerHTML = `<p class="muted">Loading…</p>`;
+  $app.innerHTML = `<p class="muted">Loading page…</p>`;
   const data = await api("/api/page?hash=" + encodeURIComponent(hash) + "&path=" + encodeURIComponent(pth));
   await api("/api/data", {
     method: "POST",
@@ -131,7 +182,8 @@ async function page(rest) {
     return;
   }
   $app.innerHTML = `
-    <div class="spread"><div><h1>${esc(hash.slice(0, 8))}</h1><div class="hash">${esc(hash + pth)}</div></div>
+    <div class="spread"><div><h1>${esc((live.nodes[hash] && live.nodes[hash].name) || hash.slice(0, 8))}</h1>
+    <div class="hash">${esc(hash + pth)}</div></div>
     <button class="ghost small" id="alias">Save alias</button></div>
     <div class="card page" id="body">${data.html || "<pre>" + esc(data.text || "") + "</pre>"}</div>`;
   $app.querySelector("#alias").onclick = async () => {
@@ -160,16 +212,10 @@ function lxmfPeer(s) {
 
 function openMesh(href, currentHash) {
   const h = String(href || "").trim();
-  if (h.startsWith("#/")) {
-    go(h.slice(2));
-    return;
-  }
+  if (h.startsWith("#/")) { go(h.slice(2)); return; }
   const fromMsg = h.match(/(?:msg\/|lxmf@)([a-fA-F0-9]{32})/i);
   const peer = lxmfPeer(h) || (fromMsg && fromMsg[1].toLowerCase());
-  if (peer && peer.length === 32) {
-    go("msg/" + peer);
-    return;
-  }
+  if (peer && peer.length === 32) { go("msg/" + peer); return; }
   let hash = currentHash;
   let path = "/page/index.mu";
   const raw = h.replace(/^nomadnetwork:\/\//, "").replace(/^https?:\/\/[^/]+\//, "");
@@ -196,28 +242,33 @@ async function alias(path) {
   go("node/" + a.hash + (rest.startsWith("/") ? rest : "/" + rest));
 }
 
-document.getElementById("goHome").onclick = () => go("home");
-document.getElementById("goMsg").onclick = () => go("msg");
-document.getElementById("goNets").onclick = () => go("networks");
-
 async function inbox() {
   const data = await api("/api/lxmf").catch(() => ({ conversations: [] }));
+  live.conv = data.conversations || [];
+  const paint = () => {
+    const box = $app.querySelector("#list");
+    if (!box) return;
+    const list = live.conv || [];
+    box.innerHTML = list.length ? list.map((c) => `
+      <div class="card spread node" data-p="${esc(c.peer)}"><div><h3>${esc(c.name)}</h3>
+      <div class="hash">${esc(c.peer)}</div><div class="muted">${esc(c.last)}</div></div>
+      <span class="badge">${c.count || 0}</span></div>`).join("") : `<p class="muted">No threads. Open a Contact me link or paste an LXMF hash.</p>`;
+    box.querySelectorAll("[data-p]").forEach((b) => { b.onclick = () => go("msg/" + b.dataset.p); });
+  };
   $app.innerHTML = `
     <h1>Messages</h1>
     <p class="muted">${data.lxmf ? "Your LXMF address: " + esc(data.me || "") : "LXMF is off. On the Pi: pip install lxmf and restart."}</p>
     <div class="row">
       <input class="field" id="newTo" placeholder="lxmf@… or hash" style="max-width:360px">
-      <button type="button" id="openTo">Open</button>
+      <button class="act" type="button" id="openTo">Open</button>
     </div>
-    <div id="list">${(data.conversations || []).length ? (data.conversations || []).map((c) => `
-      <div class="card spread"><div><h3>${esc(c.name)}</h3><div class="hash">${esc(c.peer)}</div>
-      <div class="muted">${esc(c.last)}</div></div>
-      <button class="small" data-p="${esc(c.peer)}">Open</button></div>`).join("") : `<p class="muted">Empty. Use Contact me on a node page or paste an address.</p>`}</div>`;
+    <div id="list"></div>`;
   $app.querySelector("#openTo").onclick = () => {
     const p = lxmfPeer($app.querySelector("#newTo").value.trim()) || $app.querySelector("#newTo").value.replace(/lxmf@/gi, "").trim();
     if (p) go("msg/" + p);
   };
-  $app.querySelectorAll("button[data-p]").forEach((b) => { b.onclick = () => go("msg/" + b.dataset.p); });
+  paint();
+  onLive((ev) => { if (ev && ev.type === "lxmf") paint(); });
 }
 
 function bubbleHtml(m) {
@@ -245,58 +296,63 @@ async function thread(peer) {
           <div class="hash">${esc(peer)}</div>
         </div>
       </div>
-      <div class="chat" id="chat"><p class="muted">Opening conversation…</p></div>
+      <div class="chat" id="chat"><p class="muted">Opening…</p></div>
       <form class="composer" id="form">
-        <input class="field" id="box" autocomplete="off" placeholder="Write a message">
-        <button type="submit">Send</button>
+        <input class="field" id="box" autocomplete="off" placeholder="Message">
+        <button class="act" type="submit">Send</button>
       </form>
       <p class="muted" id="st"></p>
     </div>`;
   $app.querySelector("#back").onclick = () => go("msg");
   const box = $app.querySelector("#box");
   box.focus();
-
-  const paint = (messages) => {
+  let messages = [];
+  const paint = () => {
     const el = $app.querySelector("#chat");
-    if (!messages.length) {
-      el.innerHTML = `<p class="muted">Type something — it is sent to this LXMF address immediately.</p>`;
-    } else {
+    if (!el) return;
+    if (!messages.length) el.innerHTML = `<p class="muted">Live thread. Incoming LXMF appears here.</p>`;
+    else {
       el.innerHTML = messages.map(bubbleHtml).join("");
       el.scrollTop = el.scrollHeight;
     }
   };
-
-  let data = { messages: [] };
   try {
-    data = await api("/api/lxmf?peer=" + encodeURIComponent(peer));
-  } catch {}
-  paint(data.messages || []);
-
+    const data = await api("/api/lxmf?peer=" + encodeURIComponent(peer));
+    messages = data.messages || [];
+  } catch (e) {}
+  paint();
+  onLive((ev) => {
+    if (!ev || ev.type !== "lxmf" || ev.peer !== peer || !ev.message) return;
+    messages.push(ev.message);
+    paint();
+  });
   $app.querySelector("#form").onsubmit = async (e) => {
     e.preventDefault();
     const text = box.value.trim();
     if (!text) return;
     box.value = "";
-    const pending = { dir: "out", text, title: "", ts: Date.now() / 1000, status: "…" };
-    const cur = data.messages || [];
-    cur.push(pending);
-    data.messages = cur;
-    paint(cur);
-    $app.querySelector("#st").textContent = "";
+    messages.push({ dir: "out", text, title: "", ts: Date.now() / 1000, status: "…" });
+    paint();
     const out = await api("/api/lxmf", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ to: peer, text }),
     }).catch(() => ({ ok: false, error: "No connection to the gateway" }));
     if (!out.ok) $app.querySelector("#st").textContent = out.error || "Send failed";
-    const fresh = await api("/api/lxmf?peer=" + encodeURIComponent(peer)).catch(() => data);
-    data = fresh;
-    paint(fresh.messages || cur);
+    const fresh = await api("/api/lxmf?peer=" + encodeURIComponent(peer)).catch(() => ({ messages }));
+    messages = fresh.messages || messages;
+    paint();
     box.focus();
   };
 }
+
+document.getElementById("goHome").onclick = () => go("home");
+document.getElementById("goNodes").onclick = () => go("nodes");
+document.getElementById("goMsg").onclick = () => go("msg");
+document.getElementById("goNets").onclick = () => go("networks");
 document.getElementById("addrForm").onsubmit = (e) => { e.preventDefault(); go($addr.value.trim() || "home"); };
 window.addEventListener("hashchange", render);
+startSse();
 render();
 (async function stamp() {
   const el = document.getElementById("ver");
@@ -306,9 +362,7 @@ render();
       fetch("/api/version", { cache: "no-store" }).then((r) => r.json()),
       fetch("/api/hello", { cache: "no-store" }).then((r) => r.json()),
     ]);
-    const name = h.name || "";
-    const ver = v.label || "";
-    el.textContent = [name, ver].filter(Boolean).join(" · ") || "—";
+    el.textContent = [h.name || "", v.label || ""].filter(Boolean).join(" · ") || "—";
   } catch (e) {
     el.textContent = "—";
   }
