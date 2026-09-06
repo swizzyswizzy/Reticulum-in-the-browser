@@ -28,6 +28,8 @@ lxmf_router = None
 lxmf_source = None
 lxmf_address = None
 lxmf_ok = False
+node_dest = None
+node_identity = None
 DEMO_HASH_DOCS = "a8d24177d946de4f1f0a0fe1af9a1338"
 DEMO_HASH_HUB = "9ce92808be498e9e05590ff27cbfdfe4"
 
@@ -610,6 +612,7 @@ def start_rns() -> None:
         harvest_known_paths()
         threading.Thread(target=path_harvester, daemon=True).start()
         start_lxmf()
+        start_node_announce()
     except Exception as exc:
         print(f"[gateway] Handler announce nie wszedł ({exc})")
         reticulum = reticulum  # keep instance alive
@@ -644,8 +647,96 @@ def start_lxmf():
                 pass
         lxmf_ok = True
         print(f"[gateway] LXMF {lxmf_address}")
+        threading.Thread(target=lxmf_announce_loop, daemon=True).start()
     except Exception as exc:
         print(f"[gateway] LXMF nie wstaje ({exc})")
+
+
+def host_name():
+    return (socket.gethostname() or device_name or "node").strip() or "node"
+
+
+def announce_on_all(dest, app_data):
+    import RNS
+    ifaces = list(getattr(RNS.Transport, "interfaces", None) or [])
+    sent = 0
+    if ifaces:
+        for iface in ifaces:
+            try:
+                dest.announce(app_data=app_data, attached_interface=iface)
+                sent += 1
+            except TypeError:
+                dest.announce(app_data=app_data)
+                sent = max(sent, 1)
+                break
+            except Exception as exc:
+                print(f"[gateway] announce na {iface}: {exc}")
+    if sent == 0:
+        dest.announce(app_data=app_data)
+        sent = 1
+    return sent
+
+
+def start_node_announce():
+    global node_dest, node_identity, device_name
+    try:
+        import RNS
+    except Exception:
+        return
+    device_name = host_name()
+    ident_path = os.path.expanduser("~/.reticulum-gateway/identity")
+    os.makedirs(os.path.dirname(ident_path), exist_ok=True)
+    if os.path.exists(ident_path):
+        node_identity = RNS.Identity.from_file(ident_path)
+    else:
+        node_identity = RNS.Identity()
+        node_identity.to_file(ident_path)
+    node_dest = RNS.Destination(
+        node_identity,
+        RNS.Destination.IN,
+        RNS.Destination.SINGLE,
+        "nomadnetwork",
+        "node",
+    )
+    app = device_name.encode("utf-8")
+    h = hexhash(node_dest.hash)
+    upsert_node({"hash": h, "name": device_name, "app": "nomadnetwork.node", "demo": False})
+    n = announce_on_all(node_dest, app)
+    print(f"[gateway] node {device_name} {h[:16]}… announce x{n}")
+    threading.Thread(target=node_announce_loop, daemon=True).start()
+
+
+def node_announce_loop():
+    while True:
+        time.sleep(120)
+        if node_dest is None:
+            continue
+        name = host_name()
+        try:
+            n = announce_on_all(node_dest, name.encode("utf-8"))
+            upsert_node({"hash": hexhash(node_dest.hash), "name": name, "app": "nomadnetwork.node", "demo": False})
+            print(f"[gateway] announce {name} x{n}")
+        except Exception as exc:
+            print(f"[gateway] announce {exc}")
+
+
+def lxmf_announce_loop():
+    while True:
+        time.sleep(120)
+        if not lxmf_ok or lxmf_source is None:
+            continue
+        try:
+            import RNS
+            name = host_name()
+            if hasattr(lxmf_source, "display_name"):
+                lxmf_source.display_name = name
+            app = name.encode("utf-8")
+            try:
+                announce_on_all(lxmf_source, app)
+            except Exception:
+                lxmf_source.announce()
+        except Exception as exc:
+            print(f"[gateway] lxmf announce {exc}")
 
 
 def _lxmf_in(message):
