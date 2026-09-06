@@ -4,3 +4,5 @@ __pycache__/
 *.pem
 data.json
 messages.json
+wizard/wifi.json
+wifi.json

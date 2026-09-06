@@ -23,7 +23,11 @@ else
   git clone --depth 1 "$REPO" "$DEST"
 fi
 
-python3 -m pip install --break-system-packages -q -r "$DEST/requirements.txt"
+if [ -f "$DEST/requirements.txt" ]; then
+  python3 -m pip install --break-system-packages -q -r "$DEST/requirements.txt"
+else
+  python3 -m pip install --break-system-packages -q rns lxmf
+fi
 
 id rns >/dev/null 2>&1 || useradd --system --home "$HOME_RNS" --create-home --shell /usr/sbin/nologin rns
 mkdir -p "$HOME_RNS" "$HOME_RNS/.reticulum" "$HOME_RNS/.reticulum-gateway"
