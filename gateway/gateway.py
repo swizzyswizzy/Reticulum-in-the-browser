@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lokalna bramka HTTP dla dodatku Reticulum Gateway."""
+"""Local HTTP gateway for Reticulum in the browser."""
 
 from __future__ import annotations
 
@@ -170,7 +170,7 @@ def load_demo_nodes() -> None:
     upsert_node(
         {
             "hash": DEMO_HASH_DOCS,
-            "name": "Dokumentacja Reticulum",
+            "name": "Reticulum documentation",
             "app": "nomadnetwork.node",
             "demo": True,
         }
@@ -178,7 +178,7 @@ def load_demo_nodes() -> None:
     upsert_node(
         {
             "hash": DEMO_HASH_HUB,
-            "name": "Hub testowy",
+            "name": "Test hub",
             "app": "nomadnetwork.node",
             "demo": True,
         }
@@ -186,11 +186,11 @@ def load_demo_nodes() -> None:
 
 
 def demo_page(path: str, dest_hash: str) -> str:
-    title = "Dokumentacja Reticulum" if dest_hash == DEMO_HASH_DOCS else "Hub testowy"
+    title = "Reticulum documentation" if dest_hash == DEMO_HASH_DOCS else "Test hub"
     if path.endswith("about.mu"):
         return (
             f">O node\n\n"
-            f"To jest strona demo bramki.\n\n"
+            f"This is the gateway demo page.\n\n"
             f"`[Wróć na start`{dest_hash}:/page/index.mu]\n"
         )
     return (
@@ -416,10 +416,10 @@ def default_index_mu():
         "          `-    \\`_`\"'-\n"
         "#END\n"
         "\n"
-        "Tu jeszcze nic nie ma. To startowa strona tego node'a.\n"
+        "Nothing here yet. This is the start page for this node.\n"
         "\n"
-        f"Repozytorium: {REPO_URL}\n"
-        f"Nazwa node'a: {name}\n"
+        f"Repository: {REPO_URL}\n"
+        f"Node name: {name}\n"
     )
 
 
@@ -526,10 +526,10 @@ def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> di
     try:
         dest_hash = bytes.fromhex(dest_hash_hex)
     except ValueError:
-        return {"ok": False, "error": "Niepoprawny hash"}
+        return {"ok": False, "error": "Invalid hash"}
 
     if len(dest_hash) != 16:
-        return {"ok": False, "error": "Hash musi mieć 32 znaki hex"}
+        return {"ok": False, "error": "Hash must be 32 hex characters"}
 
     if is_our_node(dest_hash):
         text = load_local_page(path)
@@ -564,7 +564,7 @@ def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> di
                 lan["hash"] = dest_hash_hex
                 lan["path"] = path
                 return lan
-            return {"ok": False, "error": "Brak tożsamości node'a w RNS — poczekaj na announce"}
+            return {"ok": False, "error": "Node identity is not in RNS yet — wait for an announce"}
 
         try:
             dest_hash = RNS.Destination.hash_from_name_and_identity("nomadnetwork.node", identity)
@@ -589,7 +589,7 @@ def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> di
             def got_response(request_receipt):
                 body = request_receipt.response
                 if body is None:
-                    finish({"ok": False, "error": "Pusta odpowiedź"})
+                    finish({"ok": False, "error": "Empty response"})
                     return
                 if isinstance(body, bytes):
                     try:
@@ -610,7 +610,7 @@ def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> di
                 )
 
             def failed(_receipt=None):
-                finish({"ok": False, "error": "Node nie oddał strony (brak handlera /page/index.mu?)"})
+                finish({"ok": False, "error": "Node did not return a page (missing /page/index.mu handler?)"})
 
             link.request(
                 path,
@@ -622,7 +622,7 @@ def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> di
 
         def closed(link):
             if not done.is_set():
-                finish({"ok": False, "error": "Połączenie zamknięte"})
+                finish({"ok": False, "error": "Connection closed"})
 
         link = RNS.Link(destination, established_callback=established, closed_callback=closed)
         if not done.wait(min(timeout, 8) + 1):
@@ -642,7 +642,7 @@ def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> di
         lan["hash"] = dest_hash_hex
         lan["path"] = path
         return lan
-    return dict(result) if result else {"ok": False, "error": "Timeout przy pobieraniu strony"}
+    return dict(result) if result else {"ok": False, "error": "Timed out fetching the page"}
 
 
 def decode_app_data(app_data):
@@ -938,7 +938,7 @@ def _lxmf_in(message):
 
 def send_lxmf(to_hex, text, title=""):
     if not lxmf_ok:
-        return {"ok": False, "error": "LXMF wyłączone. Na Pi: pip install lxmf"}
+        return {"ok": False, "error": "LXMF is off. On the Pi: pip install lxmf"}
     import LXMF
     import RNS
     to_hex = str(to_hex or "").lower().replace("lxmf@", "").replace("/", "")
@@ -956,8 +956,8 @@ def send_lxmf(to_hex, text, title=""):
                 time.sleep(0.2)
         ident = RNS.Identity.recall(dest_hash)
         if ident is None:
-            add_message(to_hex, "out", text, title, status="czekam")
-            return {"ok": False, "error": "Nie znam jeszcze tej osoby w sieci. Spróbuj za chwilę."}
+            add_message(to_hex, "out", text, title, status="waiting")
+            return {"ok": False, "error": "This peer is not known on the network yet. Try again shortly."}
         dest = RNS.Destination(ident, RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery")
         method = getattr(LXMF.LXMessage, "DIRECT", None)
         kwargs = {"desired_method": method} if method is not None else {}
@@ -965,10 +965,10 @@ def send_lxmf(to_hex, text, title=""):
         if hasattr(lxm, "try_propagation_on_fail"):
             lxm.try_propagation_on_fail = True
         lxmf_router.handle_outbound(lxm)
-        add_message(to_hex, "out", text, title, status="wysłane")
+        add_message(to_hex, "out", text, title, status="sent")
         return {"ok": True, "to": to_hex}
     except Exception as exc:
-        add_message(to_hex, "out", text, title, status="błąd")
+        add_message(to_hex, "out", text, title, status="error")
         return {"ok": False, "error": str(exc)}
 
 
@@ -976,8 +976,8 @@ NETWORK_PRESETS = [
     {
         "id": "lan",
         "section": "Siec domowa",
-        "title": "Sieć w domu",
-        "hint": "Samo znajduje inne Reticulum w Twojej sieci Wi‑Fi / LAN.",
+        "title": "Home network",
+        "hint": "Discovers other Reticulum nodes on your Wi-Fi / LAN.",
         "type": "AutoInterface",
         "options": {},
         "recommended": True,
@@ -985,8 +985,8 @@ NETWORK_PRESETS = [
     {
         "id": "auto-inet",
         "section": "Auto Internet IPv6",
-        "title": "Auto po internecie",
-        "hint": "Szuka innych node’ów w internecie po IPv6. Działa tylko gdy operator przepuszcza multicast.",
+        "title": "Auto over the internet",
+        "hint": "Looks for other nodes on the internet via IPv6. Needs multicast from the ISP.",
         "type": "AutoInterface",
         "options": {"discovery_scope": "global", "group_id": "reticulum"},
         "recommended": False,
@@ -994,8 +994,8 @@ NETWORK_PRESETS = [
     {
         "id": "rmap",
         "section": "RMAP World",
-        "title": "Sieć publiczna — RMAP",
-        "hint": "Wejście po adresie IP. Włącz to na start.",
+        "title": "Public network — RMAP",
+        "hint": "Connects by IP address. Enable this to start.",
         "type": "TCPClientInterface",
         "options": {"target_host": "217.154.9.220", "target_port": "4242"},
         "recommended": True,
@@ -1003,8 +1003,8 @@ NETWORK_PRESETS = [
     {
         "id": "nodns",
         "section": "Siec publiczna IP",
-        "title": "Sieć publiczna — zapasowy IP",
-        "hint": "Nie używa DNS. Gdy RMAP milczy, włącz to.",
+        "title": "Public network — fallback IP",
+        "hint": "Does not use DNS. Enable this if RMAP is silent.",
         "type": "TCPClientInterface",
         "options": {"target_host": "202.61.243.41", "target_port": "4965"},
         "recommended": True,
@@ -1012,8 +1012,8 @@ NETWORK_PRESETS = [
     {
         "id": "btb",
         "section": "Siec publiczna BetweenTheBorders",
-        "title": "Sieć publiczna — Between the Borders",
-        "hint": "Drugi publiczny hub.",
+        "title": "Public network — Between the Borders",
+        "hint": "Second public hub.",
         "type": "TCPClientInterface",
         "options": {"target_host": "162.255.87.166", "target_port": "4242"},
         "recommended": False,
@@ -1464,10 +1464,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "ok": True,
                 "restarting": True,
                 "config": path,
-                "note": "Bramka zaraz się zrestartuje. Odśwież panel za kilka sekund.",
+                "note": "The gateway is restarting. Refresh the panel in a few seconds.",
             }))
             return
-        self._send(*json_bytes({"ok": False, "error": "Nie znaleziono"}, 404))
+        self._send(*json_bytes({"ok": False, "error": "Not found"}, 404))
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -1548,7 +1548,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             dest = (query.get("hash") or [""])[0].strip().lower()
             page = unquote((query.get("path") or ["/page/index.mu"])[0])
             if not dest:
-                self._send(*json_bytes({"ok": False, "error": "Brak hash"}, 400))
+                self._send(*json_bytes({"ok": False, "error": "Missing hash"}, 400))
                 return
             self._send(*json_bytes(fetch_nomad_page(dest, page)))
             return
@@ -1584,7 +1584,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._send(*served)
             return
 
-        self._send(*json_bytes({"ok": False, "error": "Nie znaleziono"}, 404))
+        self._send(*json_bytes({"ok": False, "error": "Not found"}, 404))
 
     def _send(self, code, ctype, body):
         self.send_response(code)

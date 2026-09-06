@@ -7,12 +7,12 @@ mkdir -p /var/lib/rns
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] start" >> "$LOG"
 
 if [ ! -d "$DEST/.git" ]; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] brak repo — klonuję" >> "$LOG"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] no repo — cloning" >> "$LOG"
   rm -rf "$DEST"
   git clone --depth 1 -b master "$REPO" "$DEST" >>"$LOG" 2>&1 || git clone --depth 1 "$REPO" "$DEST" >>"$LOG" 2>&1
 fi
 
-cd "$DEST" || { echo "brak $DEST" >> "$LOG"; exit 1; }
+cd "$DEST" || { echo "missing $DEST" >> "$LOG"; exit 1; }
 git remote set-url origin "$REPO" >/dev/null 2>&1 || git remote add origin "$REPO" >/dev/null 2>&1
 old=$(git rev-parse HEAD 2>/dev/null)
 git fetch --depth 1 origin master >>"$LOG" 2>&1 || git fetch --depth 1 origin >>"$LOG" 2>&1
@@ -20,12 +20,12 @@ git merge --ff-only FETCH_HEAD >>"$LOG" 2>&1 || git reset --hard FETCH_HEAD >>"$
 new=$(git rev-parse HEAD 2>/dev/null)
 
 if [ -z "$new" ]; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: git nie działa" >> "$LOG"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: git failed" >> "$LOG"
   exit 1
 fi
 
 if [ "$old" = "$new" ]; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] bez zmian ($old)" >> "$LOG"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] no change ($old)" >> "$LOG"
   exit 0
 fi
 
@@ -45,4 +45,4 @@ fi
 systemctl daemon-reload
 systemctl enable --now reticulum-gateway-update.timer >>"$LOG" 2>&1
 systemctl restart reticulum-gateway >>"$LOG" 2>&1
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] zrestartowano bramkę" >> "$LOG"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] gateway restarted" >> "$LOG"

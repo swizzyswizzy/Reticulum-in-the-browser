@@ -1,12 +1,12 @@
 #!/bin/bash
-# Instalacja na Raspberry Pi. Uruchamiaj jako root.
+# Install on the Raspberry Pi. Run as root.
 set -e
 REPO="${1:-${RNS_GW_REPO:-https://github.com/swizzyswizzy/Reticulum-in-the-browser.git}}"
 DEST=/opt/reticulum-gateway
 HOME_RNS=/var/lib/rns
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "Uruchom: sudo bash install.sh"
+  echo "Run: sudo bash install.sh"
   exit 1
 fi
 
@@ -46,10 +46,10 @@ systemctl reset-failed reticulum-gateway 2>/dev/null || true
 systemctl enable reticulum-gateway
 if [ "${RNS_AUTO_UPDATE:-1}" = "0" ]; then
   systemctl disable --now reticulum-gateway-update.timer 2>/dev/null || true
-  echo "auto-update: wyłączony"
+  echo "auto-update: disabled"
 else
   systemctl enable --now reticulum-gateway-update.timer
-  echo "auto-update: włączony (co 1 min)"
+  echo "auto-update: enabled (every 1 min)"
 fi
 date "+%Y-%m-%d %H:%M:%S" > "$HOME_RNS/updated_at" || true
 
@@ -65,24 +65,24 @@ wait_service() {
     systemctl restart reticulum-gateway >>"$LOG" 2>&1 || systemctl start reticulum-gateway >>"$LOG" 2>&1 || true
     sleep 3
     if systemctl is-active --quiet reticulum-gateway; then
-      echo "[$(date -Iseconds)] reticulum-gateway active po $n próbach" | tee -a "$LOG"
+      echo "[$(date -Iseconds)] reticulum-gateway active after $n attempt(s)" | tee -a "$LOG"
       return 0
     fi
     echo "[$(date -Iseconds)] still dead: $(systemctl is-active reticulum-gateway 2>/dev/null || true)" | tee -a "$LOG"
     sleep 2
   done
-  echo "[$(date -Iseconds)] ERROR: reticulum-gateway nie wstał w 5 minut" | tee -a "$LOG"
+  echo "[$(date -Iseconds)] ERROR: reticulum-gateway did not start within 5 minutes" | tee -a "$LOG"
   systemctl --no-pager --full status reticulum-gateway >>"$LOG" 2>&1 || true
   journalctl -u reticulum-gateway -n 80 --no-pager >>"$LOG" 2>&1 || true
   return 1
 }
 
 if ! wait_service; then
-  echo "Błąd: usługa nie wstaje. Log: $LOG"
+  echo "Error: service did not start. Log: $LOG"
   exit 1
 fi
 
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo
-echo "Gotowe. Panel: http://${IP:-IP}/  oraz  https://${IP:-IP}/"
-echo "IP zapisane w $HOME_RNS/ip.txt"
+echo "Done. Panel: http://${IP:-IP}/  and  https://${IP:-IP}/"
+echo "IP written to $HOME_RNS/ip.txt"

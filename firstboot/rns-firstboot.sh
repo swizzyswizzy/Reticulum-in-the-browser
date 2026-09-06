@@ -1,5 +1,5 @@
 #!/bin/bash
-# Wrzucasz to na partycję boot karty SD. Pierwszy start sam ściąga repo i stawia bramkę.
+# Place on the SD boot partition. First boot clones the repo and starts the gateway.
 set -e
 FLAG=/var/lib/rns/.firstboot-done
 REPO="${RNS_GW_REPO:-https://github.com/swizzyswizzy/Reticulum-in-the-browser.git}"

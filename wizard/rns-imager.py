@@ -136,7 +136,7 @@ def known_hosts_path():
 def drop_known_host(name):
     name = (name or "").strip()
     if not name:
-        return "pusty adres"
+        return "empty address"
     try:
         subprocess.check_call(
             ["ssh-keygen", "-R", name],
@@ -148,7 +148,7 @@ def drop_known_host(name):
         pass
     path = known_hosts_path()
     if not os.path.isfile(path):
-        return "brak pliku known_hosts"
+        return "no known_hosts file"
     keep = []
     dropped = 0
     with open(path, encoding="utf-8", errors="replace") as fh:
@@ -160,7 +160,7 @@ def drop_known_host(name):
             keep.append(line)
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
         fh.writelines(keep)
-    return ("usunięto " + str(dropped) + " linii dla " + name) if dropped else ("nie było wpisu " + name)
+    return ("removed " + str(dropped) + " line(s) for " + name) if dropped else ("no entry for " + name)
 
 
 def make_hostname():
@@ -322,7 +322,7 @@ systemctl start rns-install.service || /usr/local/sbin/rns-install-once.sh
 echo "instalacja repo zlecona"
 """
     else:
-        install_block = 'echo "pomijam instalację bramki"\n'
+        install_block = 'echo "skipping gateway install"\n'
     return f"""#!/bin/bash
 set +e
 exec >> /boot/firmware/rns-firstboot.log 2>&1 || exec >> /boot/rns-firstboot.log 2>&1
@@ -374,7 +374,7 @@ echo "nmcli exit=$?"
 {install_block}
 if [ -f /var/lib/rns/.installed ]; then
   sed -i -E 's/ systemd\\.run[^ ]*//g' "$BOOT/cmdline.txt" 2>/dev/null
-  echo "systemd.run zdjęty — bramka już stoi"
+  echo "systemd.run removed — gateway already installed"
 fi
 echo "RNS firstboot done"
 """
@@ -386,23 +386,23 @@ HOOK = "bash /boot/firmware/rns-firstboot.sh || bash /boot/rns-firstboot.sh || t
 def hook_firstrun(boot, ssid, psk, hostname, root_pw, log, do_install=True, auto_update=False):
     path = os.path.join(boot, "firstrun.sh")
     if os.path.isfile(path):
-        log("jest firstrun.sh z Imagera — " + str(os.path.getsize(path)) + " B")
+        log("Imager firstrun.sh present — " + str(os.path.getsize(path)) + " B")
         try:
             text = read_text(path)
         except Exception:
             text = open(path, encoding="utf-8", errors="replace").read()
         if "rns-firstboot.sh" in text:
-            log("hook już był w firstrun.sh")
+            log("hook already in firstrun.sh")
             return
         if re.search(r"^exit 0", text, re.M):
             text = text.replace("exit 0", HOOK + "exit 0", 1)
-            log("hook wstawiony przed exit 0")
+            log("hook inserted before exit 0")
         else:
             text = text.rstrip() + "\n" + HOOK
-            log("hook dopisany na końcu firstrun.sh")
+            log("hook appended to firstrun.sh")
         write_text(path, text)
         return
-    log("brak firstrun.sh — tworzę własny")
+    log("no firstrun.sh — writing our own")
     write_text(path, firstboot_sh(ssid, psk, hostname, root_pw, do_install, auto_update))
 
 
@@ -412,10 +412,10 @@ def apply(boot, ssid, psk, hostname, root_pw, log, do_install=True, auto_update=
         if os.path.isfile(p):
             log(f"  {name}: {os.path.getsize(p)} B")
         else:
-            log(f"  {name}: BRAK")
+            log(f"  {name}: MISSING")
 
     log("1. bootfs = " + boot)
-    log("2. pliki na karcie:")
+    log("2. files on the card:")
     for name in (
         "cmdline.txt", "config.txt", "firstrun.sh", "user-data",
         "network-config", "meta-data", "wpa_supplicant.conf", "ssh",
@@ -424,18 +424,18 @@ def apply(boot, ssid, psk, hostname, root_pw, log, do_install=True, auto_update=
 
     cmd_path = os.path.join(boot, "cmdline.txt")
     old_cmd = read_text(cmd_path)
-    log("3. cmdline PRZED:")
+    log("3. cmdline BEFORE:")
     log("   " + old_cmd.strip())
     if "ds=nocloud" in old_cmd:
-        log("   wykryto cloud-init (ds=nocloud) — Imager 2.x / Trixie")
+        log("   cloud-init (ds=nocloud) detected — Imager 2.x / Trixie")
     if "systemd.run" in old_cmd:
-        log("   wykryto systemd.run (stary firstrun)")
+        log("   systemd.run detected (legacy firstrun)")
     new_cmd = patch_cmdline(old_cmd)
     if "cfg80211.ieee80211_regdom=" not in new_cmd:
         new_cmd = new_cmd.rstrip() + " cfg80211.ieee80211_regdom=PL\n"
-        log("   dopisuję regdom=PL")
+        log("   adding regdom=PL")
     write_text(cmd_path, new_cmd)
-    log("4. cmdline PO:")
+    log("4. cmdline AFTER:")
     log("   " + new_cmd.strip())
 
     cfg_path = os.path.join(boot, "config.txt")
@@ -443,13 +443,13 @@ def apply(boot, ssid, psk, hostname, root_pw, log, do_install=True, auto_update=
     new_cfg = patch_config(old_cfg)
     write_text(cfg_path, new_cfg)
     log("5. config.txt: dtoverlay=dwc2=" + str("dtoverlay=dwc2" in new_cfg) +
-        "  otg_mode zakomentowane=" + str(bool(re.search(r"^#otg_mode=", new_cfg, re.M))))
+        "  otg_mode commented=" + str(bool(re.search(r"^#otg_mode=", new_cfg, re.M))))
 
-    log("6. zapis network-config (cloud-init / netplan — tak działa Trixie)")
+    log("6. writing network-config (cloud-init / netplan for Trixie)")
     write_text(os.path.join(boot, "network-config"), network_config(ssid, psk))
-    log("   SSID=" + ssid + "  hasło=" + str(len(psk)) + " znaków")
+    log("   SSID=" + ssid + "  password=" + str(len(psk)) + " chars")
 
-    log("7. zapis wpa_supplicant.conf (starsze obrazy)")
+    log("7. writing wpa_supplicant.conf (older images)")
     write_text(os.path.join(boot, "wpa_supplicant.conf"), wpa_conf(ssid, psk))
 
     log("8. hostname=" + hostname + "  user=rtclm")
@@ -460,11 +460,11 @@ def apply(boot, ssid, psk, hostname, root_pw, log, do_install=True, auto_update=
     if hashed:
         write_text(os.path.join(boot, "userconf.txt"), "rtclm:" + hashed + "\n")
         write_text(os.path.join(boot, "userconf"), "rtclm:" + hashed + "\n")
-        log("   userconf.txt zapisany")
+        log("   userconf.txt written")
     else:
-        log("   brak openssl/crypt — user z cloud-init i firstboot")
+        log("   no openssl/crypt — user from cloud-init and firstboot")
 
-    log("9. zapis rns-firstboot.sh")
+    log("9. writing rns-firstboot.sh")
     write_text(os.path.join(boot, "rns-firstboot.sh"), firstboot_sh(ssid, psk, hostname, root_pw, do_install, auto_update))
     log("   auto-install repo=" + str(do_install) + "  auto-update=" + str(auto_update))
 
@@ -472,12 +472,12 @@ def apply(boot, ssid, psk, hostname, root_pw, log, do_install=True, auto_update=
     hook_firstrun(boot, ssid, psk, hostname, root_pw, log, do_install, auto_update)
 
     write_text(os.path.join(boot, "ssh"), "")
-    log("11. plik ssh (włączenie demona)")
+    log("11. ssh file (enable daemon)")
 
-    log("12. kontrola po zapisie:")
+    log("12. verify after write:")
     for name in ("cmdline.txt", "network-config", "user-data", "userconf.txt", "rns-firstboot.sh", "firstrun.sh", "ssh"):
         peek(name)
-    log("13. gotowe. SSH: rtclm / reticulum   host: " + hostname)
+    log("13. done. SSH: rtclm / reticulum   host: " + hostname)
 
 
 def box():
@@ -504,11 +504,12 @@ class App(QMainWindow):
         col.setContentsMargins(16, 16, 16, 16)
         col.setSpacing(10)
 
-        title = QLabel("RETICULUM  ·  karta SD")
+        title = QLabel("RETICULUM  ·  SD card")
         title.setObjectName("title")
         hint = QLabel(
-            "Najpierw nagraj Lite 64-bit Raspberry Pi Imagerem (Wi‑Fi możesz też tam ustawić). "
-            "Potem zostaw kartę i wciśnij RUN — dopiszemy firstboot bramki."
+            "Write Raspberry Pi OS Lite 64-bit with Raspberry Pi Imager first "
+            "(you may also set Wi-Fi there). Leave the card in the reader and click RUN — "
+            "this tool only adds the gateway first-boot files."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -517,10 +518,10 @@ class App(QMainWindow):
 
         b1 = box()
         row = QHBoxLayout()
-        row.addWidget(QLabel("Karta"))
+        row.addWidget(QLabel("Card"))
         self.card = QComboBox()
         row.addWidget(self.card, 1)
-        scan = QPushButton("Odśwież")
+        scan = QPushButton("Refresh")
         scan.clicked.connect(self.refresh)
         row.addWidget(scan)
         b1.layout().addLayout(row)
@@ -537,7 +538,7 @@ class App(QMainWindow):
         self.psk.setEchoMode(QLineEdit.Password)
         g.addWidget(QLabel("SSID"), 0, 0)
         g.addWidget(self.ssid, 0, 1)
-        g.addWidget(QLabel("Hasło"), 1, 0)
+        g.addWidget(QLabel("Password"), 1, 0)
         g.addWidget(self.psk, 1, 1)
         b2.layout().addLayout(g)
         saved = {}
@@ -551,10 +552,10 @@ class App(QMainWindow):
         self.err_net = QLabel("")
         self.err_net.setObjectName("err")
         b2.layout().addWidget(self.err_net)
-        self.do_install = QCheckBox("Pobierz repo i startuj bramkę (http/https) przy starcie Pi")
+        self.do_install = QCheckBox("Clone the repo and start the gateway (HTTP/HTTPS) on first boot")
         self.do_install.setChecked(bool(saved.get("do_install", True)))
         b2.layout().addWidget(self.do_install)
-        self.auto_update = QCheckBox("Automatycznie pobieraj nowe aktualizacje repozytorium na urządzenie")
+        self.auto_update = QCheckBox("Automatically pull repository updates onto the device")
         self.auto_update.setChecked(bool(saved.get("auto_update", False)))
         b2.layout().addWidget(self.auto_update)
         col.addWidget(b2)
@@ -564,10 +565,10 @@ class App(QMainWindow):
         self.host_lab.setObjectName("cred")
         self.user_lab = QLabel("ssh: rtclm / reticulum")
         self.user_lab.setObjectName("cred")
-        self.pw_lab = QLabel("hasło roota: (po RUN)")
+        self.pw_lab = QLabel("root password: (after RUN)")
         self.pw_lab.setObjectName("rootpw")
         self.pw_lab.setWordWrap(True)
-        copy = QPushButton("Kopiuj hasło roota")
+        copy = QPushButton("Copy root password")
         copy.clicked.connect(self.copy_root)
         cred.layout().addWidget(self.host_lab)
         cred.layout().addWidget(self.user_lab)
@@ -575,8 +576,8 @@ class App(QMainWindow):
         cred.layout().addWidget(copy)
         kh = QHBoxLayout()
         self.kh_host = QLineEdit(str(saved.get("ssh_host") or "192.168.0.153"))
-        self.kh_host.setPlaceholderText("IP albo node-xxxxx")
-        wipe = QPushButton("Wyrzuć z known_hosts")
+        self.kh_host.setPlaceholderText("IP or node-xxxxx")
+        wipe = QPushButton("Remove from known_hosts")
         wipe.clicked.connect(self.wipe_known)
         kh.addWidget(self.kh_host)
         kh.addWidget(wipe)
@@ -609,7 +610,7 @@ class App(QMainWindow):
             if t not in seen:
                 seen.append(t)
         if not seen:
-            self.say("wpisz IP albo zrób RUN (żeby była nazwa hosta)")
+            self.say("enter an IP or click RUN first (so a hostname exists)")
             return
         for t in seen:
             self.say(drop_known_host(t))
@@ -618,7 +619,7 @@ class App(QMainWindow):
         if not self.root_pw:
             return
         QApplication.clipboard().setText(self.root_pw)
-        self.say("hasło roota w schowku")
+        self.say("root password copied")
 
     def say(self, text):
         self.log.append(text)
@@ -628,12 +629,12 @@ class App(QMainWindow):
         self.card.clear()
         self.cards = list_bootfs()
         if not self.cards:
-            self.card.addItem("włóż kartę z Lite i odśwież")
-            self.say("nie widzę bootfs — najpierw Imager")
+            self.card.addItem("insert a Lite-imaged card and refresh")
+            self.say("no bootfs yet — run Imager first")
             return
         for c in self.cards:
             self.card.addItem(c["label"])
-        self.say("karta: " + self.cards[0]["label"])
+        self.say("card: " + self.cards[0]["label"])
 
     def selected(self):
         i = self.card.currentIndex()
@@ -647,15 +648,15 @@ class App(QMainWindow):
         card = self.selected()
         ssid = self.ssid.text().strip()
         if not card:
-            self.err_card.setText("tu: karta z cmdline.txt (po Imagerze)")
+            self.err_card.setText("select the card that already has cmdline.txt (after Imager)")
             return
         if not ssid:
-            self.err_net.setText("tu: podaj SSID")
+            self.err_net.setText("enter the SSID")
             return
         self.hostname = make_hostname()
         self.root_pw = make_root_pw()
         self.host_lab.setText("host: " + self.hostname)
-        self.pw_lab.setText("hasło roota: " + self.root_pw)
+        self.pw_lab.setText("root password: " + self.root_pw)
         self.say("=== RUN " + card["path"] + " ===")
         try:
             apply(
@@ -673,7 +674,7 @@ class App(QMainWindow):
                 }, fh)
         except Exception as exc:
             self.err_card.setText(str(exc))
-            self.say("BŁĄD: " + str(exc))
+            self.say("ERROR: " + str(exc))
             return
 
 
