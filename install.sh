@@ -34,9 +34,22 @@ mkdir -p "$HOME_RNS" "$HOME_RNS/.reticulum" "$HOME_RNS/.reticulum-gateway"
 chown -R rns:rns "$HOME_RNS"
 
 cp "$DEST/systemd/reticulum-gateway.service" /etc/systemd/system/reticulum-gateway.service
+if [ -f "$DEST/systemd/rns-update.sh" ]; then
+  install -m 755 "$DEST/systemd/rns-update.sh" /usr/local/sbin/rns-update.sh
+fi
+if [ -f "$DEST/systemd/reticulum-gateway-update.service" ]; then
+  cp "$DEST/systemd/reticulum-gateway-update.service" /etc/systemd/system/
+  cp "$DEST/systemd/reticulum-gateway-update.timer" /etc/systemd/system/
+fi
 systemctl daemon-reload
 systemctl reset-failed reticulum-gateway 2>/dev/null || true
 systemctl enable reticulum-gateway
+if [ "${RNS_AUTO_UPDATE:-0}" = "1" ]; then
+  systemctl enable --now reticulum-gateway-update.timer
+  echo "auto-update: włączony (co 6h + 10 min po starcie)"
+else
+  systemctl disable --now reticulum-gateway-update.timer 2>/dev/null || true
+fi
 
 LOG="$HOME_RNS/install.log"
 mkdir -p "$HOME_RNS"
@@ -69,5 +82,5 @@ fi
 
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo
-echo "Gotowe. Panel: http://${IP:-IP}:4240"
+echo "Gotowe. Panel: http://${IP:-IP}/  oraz  https://${IP:-IP}/"
 echo "IP zapisane w $HOME_RNS/ip.txt"

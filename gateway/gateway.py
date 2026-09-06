@@ -14,8 +14,10 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-PORT = 4240
+PORT = 80
+HTTPS_PORT = 443
 APP_NAME = "Reticulum Gateway"
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 DATA_FILE = os.path.expanduser("~/.reticulum-gateway/data.json")
 MSG_FILE = os.path.expanduser("~/.reticulum-gateway/messages.json")
@@ -1044,6 +1046,22 @@ def start_mdns(port: int) -> None:
         print(f"[gateway] mDNS pominięty ({exc})")
 
 
+def git_version():
+    try:
+        import subprocess
+        count = subprocess.check_output(
+            ["git", "-C", REPO_ROOT, "rev-list", "--count", "HEAD"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+        sha = subprocess.check_output(
+            ["git", "-C", REPO_ROOT, "rev-parse", "--short=8", "HEAD"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+        return {"ok": True, "count": int(count), "hash": sha, "label": f"{count} {sha}"}
+    except Exception:
+        return {"ok": False, "count": 0, "hash": "", "label": "—"}
+
+
 def ensure_certs():
     folder = os.path.expanduser("~/.reticulum-gateway")
     os.makedirs(folder, exist_ok=True)
@@ -1062,28 +1080,7 @@ def ensure_certs():
 
 
 class DualHTTPServer(ThreadingHTTPServer):
-    def __init__(self, addr, handler, ssl_ctx=None):
-        super().__init__(addr, handler)
-        self.ssl_ctx = ssl_ctx
-
-    def get_request(self):
-        sock, addr = self.socket.accept()
-        if not self.ssl_ctx:
-            return sock, addr
-        sock.settimeout(2)
-        try:
-            first = sock.recv(1, socket.MSG_PEEK)
-        except Exception:
-            sock.close()
-            raise
-        sock.settimeout(None)
-        if first == b"\x16":
-            try:
-                sock = self.ssl_ctx.wrap_socket(sock, server_side=True)
-            except ssl.SSLError:
-                sock.close()
-                raise
-        return sock, addr
+    pass
 
 
 def serve_web(path):
@@ -1226,6 +1223,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._send(*json_bytes({"ok": True, **load_store()}))
             return
 
+        if path == "/api/version":
+            self._send(*json_bytes(git_version()))
+            return
+
         if path == "/api/hello":
             self._send(*json_bytes({
                 "ok": True,
@@ -1317,22 +1318,23 @@ def main():
             print("[gateway] działam z node'ami poglądowymi")
 
     start_mdns(args.port)
-    ssl_ctx = None
+    http = ThreadingHTTPServer(("0.0.0.0", args.port), GatewayHandler)
+    print(f"[gateway] http://0.0.0.0:{args.port}")
     try:
         cert, key = ensure_certs()
-        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_ctx.load_cert_chain(cert, key)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, key)
+        https = ThreadingHTTPServer(("0.0.0.0", HTTPS_PORT), GatewayHandler)
+        https.socket = ctx.wrap_socket(https.socket, server_side=True)
+        threading.Thread(target=https.serve_forever, daemon=True).start()
+        print(f"[gateway] https://0.0.0.0:{HTTPS_PORT}  (self-signed)")
     except Exception as exc:
         print(f"[gateway] TLS pominięty ({exc})")
-    server = DualHTTPServer(("0.0.0.0", args.port), GatewayHandler, ssl_ctx)
-    print(f"[gateway] http://0.0.0.0:{args.port}")
-    if ssl_ctx:
-        print(f"[gateway] https://0.0.0.0:{args.port}  (ten sam port, na potrzeby Firefoksa)")
     try:
-        server.serve_forever()
+        http.serve_forever()
     except KeyboardInterrupt:
         print("\n[gateway] stop")
-        server.server_close()
+        http.server_close()
 
 
 if __name__ == "__main__":

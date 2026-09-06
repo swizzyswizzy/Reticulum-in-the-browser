@@ -272,7 +272,7 @@ def wpa_conf(ssid, psk):
     )
 
 
-def firstboot_sh(ssid, psk, hostname, root_pw, do_install=True):
+def firstboot_sh(ssid, psk, hostname, root_pw, do_install=True, auto_update=False):
     repo = REPO_URL.replace("'", "'\\''")
     ssid_q = ssid.replace("'", "'\\''")
     psk_q = psk.replace("'", "'\\''")
@@ -300,7 +300,7 @@ apt-get install -y -qq wget ca-certificates git python3 python3-pip openssl
 RAW="{repo}"
 RAW="${{RAW%.git}}"
 RAW="https://raw.githubusercontent.com/${{RAW#https://github.com/}}/refs/heads/master/install.sh"
-wget -O /tmp/rns-install.sh "$RAW" && bash /tmp/rns-install.sh '{repo}'
+wget -O /tmp/rns-install.sh "$RAW" && RNS_AUTO_UPDATE={1 if auto_update else 0} bash /tmp/rns-install.sh '{repo}'
 touch "$FLAG"
 INST
 chmod 755 /usr/local/sbin/rns-install-once.sh
@@ -383,7 +383,7 @@ echo "RNS firstboot done"
 HOOK = "bash /boot/firmware/rns-firstboot.sh || bash /boot/rns-firstboot.sh || true\n"
 
 
-def hook_firstrun(boot, ssid, psk, hostname, root_pw, log, do_install=True):
+def hook_firstrun(boot, ssid, psk, hostname, root_pw, log, do_install=True, auto_update=False):
     path = os.path.join(boot, "firstrun.sh")
     if os.path.isfile(path):
         log("jest firstrun.sh z Imagera — " + str(os.path.getsize(path)) + " B")
@@ -403,10 +403,10 @@ def hook_firstrun(boot, ssid, psk, hostname, root_pw, log, do_install=True):
         write_text(path, text)
         return
     log("brak firstrun.sh — tworzę własny")
-    write_text(path, firstboot_sh(ssid, psk, hostname, root_pw, do_install))
+    write_text(path, firstboot_sh(ssid, psk, hostname, root_pw, do_install, auto_update))
 
 
-def apply(boot, ssid, psk, hostname, root_pw, log, do_install=True):
+def apply(boot, ssid, psk, hostname, root_pw, log, do_install=True, auto_update=False):
     def peek(name):
         p = os.path.join(boot, name)
         if os.path.isfile(p):
@@ -465,11 +465,11 @@ def apply(boot, ssid, psk, hostname, root_pw, log, do_install=True):
         log("   brak openssl/crypt — user z cloud-init i firstboot")
 
     log("9. zapis rns-firstboot.sh")
-    write_text(os.path.join(boot, "rns-firstboot.sh"), firstboot_sh(ssid, psk, hostname, root_pw, do_install))
-    log("   auto-install repo=" + str(do_install))
+    write_text(os.path.join(boot, "rns-firstboot.sh"), firstboot_sh(ssid, psk, hostname, root_pw, do_install, auto_update))
+    log("   auto-install repo=" + str(do_install) + "  auto-update=" + str(auto_update))
 
     log("10. hook firstrun")
-    hook_firstrun(boot, ssid, psk, hostname, root_pw, log, do_install)
+    hook_firstrun(boot, ssid, psk, hostname, root_pw, log, do_install, auto_update)
 
     write_text(os.path.join(boot, "ssh"), "")
     log("11. plik ssh (włączenie demona)")
@@ -551,9 +551,12 @@ class App(QMainWindow):
         self.err_net = QLabel("")
         self.err_net.setObjectName("err")
         b2.layout().addWidget(self.err_net)
-        self.do_install = QCheckBox("Pobierz repo i startuj bramkę (:4240) przy starcie Pi")
+        self.do_install = QCheckBox("Pobierz repo i startuj bramkę (http/https) przy starcie Pi")
         self.do_install.setChecked(bool(saved.get("do_install", True)))
         b2.layout().addWidget(self.do_install)
+        self.auto_update = QCheckBox("Automatycznie pobieraj nowe aktualizacje repozytorium na urządzenie")
+        self.auto_update.setChecked(bool(saved.get("auto_update", False)))
+        b2.layout().addWidget(self.auto_update)
         col.addWidget(b2)
 
         cred = box()
@@ -658,6 +661,7 @@ class App(QMainWindow):
             apply(
                 card["path"], ssid, self.psk.text(), self.hostname, self.root_pw, self.say,
                 self.do_install.isChecked(),
+                self.auto_update.isChecked(),
             )
             with open(WIFI_SAVE, "w", encoding="utf-8") as fh:
                 json.dump({
@@ -665,6 +669,7 @@ class App(QMainWindow):
                     "psk": self.psk.text(),
                     "ssh_host": self.kh_host.text().strip(),
                     "do_install": self.do_install.isChecked(),
+                    "auto_update": self.auto_update.isChecked(),
                 }, fh)
         except Exception as exc:
             self.err_card.setText(str(exc))

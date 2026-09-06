@@ -8,6 +8,9 @@ StartLimitIntervalSec=0
 Type=simple
 User=rns
 Group=rns
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
 Environment=HOME=/var/lib/rns
 WorkingDirectory=/opt/reticulum-gateway/gateway
 ExecStart=/usr/bin/python3 /opt/reticulum-gateway/gateway/gateway.py

@@ -54,6 +54,12 @@ h2 { font-size: 16px; margin: 20px 0 8px; }
 .page th, .page td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; }
 .page th { color: var(--acc2); }
 label.card { cursor: pointer; }
+.ver {
+  position: fixed; right: 10px; bottom: 8px; z-index: 40;
+  font: 11px/1.2 ui-monospace, Consolas, monospace;
+  color: var(--muted); pointer-events: none; user-select: text;
+  opacity: .75;
+}
 body.chat-on main { max-width: 720px; padding: 0 0 12px; }
 .chat-app { display: flex; flex-direction: column; height: calc(100vh - 62px); }
 .chat-head { display: flex; gap: 10px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }

@@ -298,3 +298,10 @@ async function thread(peer) {
 document.getElementById("addrForm").onsubmit = (e) => { e.preventDefault(); go($addr.value.trim() || "home"); };
 window.addEventListener("hashchange", render);
 render();
+fetch("/api/version", { cache: "no-store" })
+  .then((r) => r.json())
+  .then((v) => {
+    const el = document.getElementById("ver");
+    if (el) el.textContent = v.label || "—";
+  })
+  .catch(() => {});
