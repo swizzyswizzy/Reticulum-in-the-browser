@@ -298,10 +298,18 @@ async function thread(peer) {
 document.getElementById("addrForm").onsubmit = (e) => { e.preventDefault(); go($addr.value.trim() || "home"); };
 window.addEventListener("hashchange", render);
 render();
-fetch("/api/version", { cache: "no-store" })
-  .then((r) => r.json())
-  .then((v) => {
-    const el = document.getElementById("ver");
-    if (el) el.textContent = v.label || "—";
-  })
-  .catch(() => {});
+(async function stamp() {
+  const el = document.getElementById("ver");
+  if (!el) return;
+  try {
+    const [v, h] = await Promise.all([
+      fetch("/api/version", { cache: "no-store" }).then((r) => r.json()),
+      fetch("/api/hello", { cache: "no-store" }).then((r) => r.json()),
+    ]);
+    const name = h.name || "";
+    const ver = v.label || "";
+    el.textContent = [name, ver].filter(Boolean).join(" · ") || "—";
+  } catch (e) {
+    el.textContent = "—";
+  }
+})();

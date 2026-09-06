@@ -22,6 +22,8 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 DATA_FILE = os.path.expanduser("~/.reticulum-gateway/data.json")
 MSG_FILE = os.path.expanduser("~/.reticulum-gateway/messages.json")
 LXMF_DIR = os.path.expanduser("~/.reticulum-gateway/lxmf")
+PAGES_DIR = os.path.expanduser("~/.reticulum-gateway/pages")
+REPO_URL = "https://github.com/swizzyswizzy/Reticulum-in-the-browser"
 data_lock = threading.Lock()
 msg_lock = threading.Lock()
 lxmf_router = None
@@ -339,9 +341,21 @@ def micron_to_html(text: str) -> str:
     st = {"bold": False, "italic": False, "under": False, "fg": None, "bg": None, "align": ""}
     out = []
     table = []
+    ascii_buf = None
     for raw in (text or "").replace("\r\n", "\n").split("\n"):
         line = raw.rstrip()
         stripped = line.strip()
+        if ascii_buf is not None:
+            if stripped == "#END":
+                import html as H
+                out.append("<pre class=\"ascii\">" + H.escape("\n".join(ascii_buf)) + "</pre>")
+                ascii_buf = None
+            else:
+                ascii_buf.append(raw)
+            continue
+        if stripped == "#ASCII":
+            ascii_buf = []
+            continue
         if stripped.startswith("#"):
             continue
         if stripped in ("`t", "`T") or stripped.startswith("`t"):
@@ -388,6 +402,57 @@ def micron_to_html(text: str) -> str:
     return "\n".join(out)
 
 
+def default_index_mu():
+    name = host_name()
+    return (
+        f"`c`!{name}``\n"
+        "`c`F999placeholder``\n"
+        "\n"
+        "#ASCII\n"
+        " _._     _,-'\"\"`-._\n"
+        "(,-.`._,'(       |\\`-/|\n"
+        "    `-.-' \\ )-`( , o o)\n"
+        "          `-    \\`_`\"'-\n"
+        "#END\n"
+        "\n"
+        "Tu jeszcze nic nie ma. To startowa strona tego node'a.\n"
+        "\n"
+        f"Repozytorium: {REPO_URL}\n"
+        f"Nazwa node'a: {name}\n"
+    )
+
+
+def ensure_pages():
+    os.makedirs(PAGES_DIR, exist_ok=True)
+    index = os.path.join(PAGES_DIR, "index.mu")
+    if not os.path.isfile(index) or os.path.getsize(index) < 20:
+        with open(index, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(default_index_mu())
+
+
+def page_file(req_path: str) -> str:
+    req_path = (req_path or "/page/index.mu").split("?")[0]
+    if req_path.startswith("/page/"):
+        req_path = req_path[6:]
+    req_path = req_path.lstrip("/")
+    if not req_path:
+        req_path = "index.mu"
+    if ".." in req_path or req_path.startswith("/"):
+        req_path = "index.mu"
+    return os.path.join(PAGES_DIR, req_path)
+
+
+def load_local_page(req_path: str) -> str:
+    ensure_pages()
+    full = page_file(req_path)
+    if os.path.isfile(full):
+        with open(full, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    if req_path.endswith("index.mu") or req_path in ("/page/index.mu", "index.mu", "/"):
+        return default_index_mu()
+    return f"`!Brak strony``\n\nNie ma {req_path}\n"
+
+
 def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> dict:
     path = path or "/page/index.mu"
     if not path.startswith("/"):
@@ -418,6 +483,17 @@ def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> di
 
     if len(dest_hash) != 16:
         return {"ok": False, "error": "Hash musi mieć 32 znaki hex"}
+
+    if node_dest is not None and dest_hash == node_dest.hash:
+        text = load_local_page(path)
+        return {
+            "ok": True,
+            "hash": dest_hash_hex,
+            "path": path,
+            "text": text,
+            "html": micron_to_html(text),
+            "source": "local",
+        }
 
     result = {"ok": False, "error": "Timeout"}
     done = threading.Event()
@@ -698,6 +774,22 @@ def start_node_announce():
         "nomadnetwork",
         "node",
     )
+    ensure_pages()
+
+    def page_response(path, data, request_id, link_id, remote_identity, requested_at):
+        try:
+            return load_local_page(path or "/page/index.mu").encode("utf-8")
+        except Exception as exc:
+            return f"`!blad`` {exc}".encode("utf-8")
+
+    try:
+        node_dest.register_request_handler(
+            "/page",
+            response_generator=page_response,
+            allow=RNS.Destination.ALLOW_ALL,
+        )
+    except Exception as exc:
+        print(f"[gateway] handler stron: {exc}")
     app = device_name.encode("utf-8")
     h = hexhash(node_dest.hash)
     upsert_node({"hash": h, "name": device_name, "app": "nomadnetwork.node", "demo": False})
