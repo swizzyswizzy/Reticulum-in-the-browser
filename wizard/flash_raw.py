@@ -484,11 +484,11 @@ done
 echo "IP=$ip"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl ca-certificates git python3 python3-pip openssl
+apt-get install -y -qq wget ca-certificates git python3 python3-pip openssl
 RAW="{repo_q}"
 RAW="${{RAW%.git}}"
-RAW="https://raw.githubusercontent.com/${{RAW#https://github.com/}}/main/install.sh"
-curl -fsSL "$RAW" -o /tmp/rns-install.sh && bash /tmp/rns-install.sh '{repo_q}'
+RAW="https://raw.githubusercontent.com/${{RAW#https://github.com/}}/refs/heads/master/install.sh"
+wget -O /tmp/rns-install.sh "$RAW" && bash /tmp/rns-install.sh '{repo_q}'
 sed -i -E 's/ systemd.run[^ ]*//g' "$BOOT/cmdline.txt" 2>/dev/null
 rm -f "$BOOT/firstrun.sh" "$BOOT/rns-net.nmconnection"
 echo "RNS firstboot done"

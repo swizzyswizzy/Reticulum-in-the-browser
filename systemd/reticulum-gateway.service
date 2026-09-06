@@ -2,6 +2,7 @@
 Description=Reticulum Gateway
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -11,7 +12,7 @@ Environment=HOME=/var/lib/rns
 WorkingDirectory=/opt/reticulum-gateway/gateway
 ExecStart=/usr/bin/python3 /opt/reticulum-gateway/gateway/gateway.py
 Restart=always
-RestartSec=4
+RestartSec=5
 ExecStartPost=/bin/sh -c 'hostname -I > /var/lib/rns/ip.txt || true'
 
 [Install]

@@ -4,7 +4,7 @@ set -e
 FLAG=/var/lib/rns/.firstboot-done
 REPO="${RNS_GW_REPO:-https://github.com/swizzyswizzy/Reticulum-in-the-browser.git}"
 RAW="${REPO%.git}"
-RAW="${RAW/github.com/raw.githubusercontent.com}/main/install.sh"
+RAW="${RAW/github.com/raw.githubusercontent.com}/refs/heads/master/install.sh"
 
 if [ -f "$FLAG" ]; then
   exit 0
@@ -12,9 +12,9 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl ca-certificates
+apt-get install -y -qq wget ca-certificates
 
-curl -fsSL "$RAW" -o /tmp/rns-install.sh
+wget -O /tmp/rns-install.sh "$RAW"
 bash /tmp/rns-install.sh "$REPO"
 
 mkdir -p /var/lib/rns

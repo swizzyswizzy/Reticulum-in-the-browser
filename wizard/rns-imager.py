@@ -296,11 +296,11 @@ for i in $(seq 1 90); do
 done
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl ca-certificates git python3 python3-pip openssl
+apt-get install -y -qq wget ca-certificates git python3 python3-pip openssl
 RAW="{repo}"
 RAW="${{RAW%.git}}"
-RAW="https://raw.githubusercontent.com/${{RAW#https://github.com/}}/main/install.sh"
-curl -fsSL "$RAW" -o /tmp/rns-install.sh && bash /tmp/rns-install.sh '{repo}'
+RAW="https://raw.githubusercontent.com/${{RAW#https://github.com/}}/refs/heads/master/install.sh"
+wget -O /tmp/rns-install.sh "$RAW" && bash /tmp/rns-install.sh '{repo}'
 touch "$FLAG"
 INST
 chmod 755 /usr/local/sbin/rns-install-once.sh

@@ -35,10 +35,38 @@ chown -R rns:rns "$HOME_RNS"
 
 cp "$DEST/systemd/reticulum-gateway.service" /etc/systemd/system/reticulum-gateway.service
 systemctl daemon-reload
+systemctl reset-failed reticulum-gateway 2>/dev/null || true
 systemctl enable reticulum-gateway
-systemctl restart reticulum-gateway
 
-sleep 1
+LOG="$HOME_RNS/install.log"
+mkdir -p "$HOME_RNS"
+wait_service() {
+  deadline=$(( $(date +%s) + 300 ))
+  n=0
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    n=$((n + 1))
+    echo "[$(date -Iseconds)] restart #$n" | tee -a "$LOG"
+    systemctl reset-failed reticulum-gateway 2>/dev/null || true
+    systemctl restart reticulum-gateway >>"$LOG" 2>&1 || systemctl start reticulum-gateway >>"$LOG" 2>&1 || true
+    sleep 3
+    if systemctl is-active --quiet reticulum-gateway; then
+      echo "[$(date -Iseconds)] reticulum-gateway active po $n próbach" | tee -a "$LOG"
+      return 0
+    fi
+    echo "[$(date -Iseconds)] still dead: $(systemctl is-active reticulum-gateway 2>/dev/null || true)" | tee -a "$LOG"
+    sleep 2
+  done
+  echo "[$(date -Iseconds)] ERROR: reticulum-gateway nie wstał w 5 minut" | tee -a "$LOG"
+  systemctl --no-pager --full status reticulum-gateway >>"$LOG" 2>&1 || true
+  journalctl -u reticulum-gateway -n 80 --no-pager >>"$LOG" 2>&1 || true
+  return 1
+}
+
+if ! wait_service; then
+  echo "Błąd: usługa nie wstaje. Log: $LOG"
+  exit 1
+fi
+
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo
 echo "Gotowe. Panel: http://${IP:-IP}:4240"
