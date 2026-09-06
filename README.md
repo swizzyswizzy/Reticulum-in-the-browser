@@ -1,5 +1,18 @@
 # Reticulum in the Browser
 
+## Official documentation
+
+This repository is a browser gateway on top of the Reticulum stack. Protocol behaviour, interfaces, addressing and NomadNet pages are defined by the upstream projects — not by this appliance.
+
+| Project | What it is | Documentation |
+| --- | --- | --- |
+| **Reticulum / RNS** | Cryptographic mesh networking stack | [Manual](https://markqvist.github.io/Reticulum/manual/) · [reticulum.network](https://reticulum.network) · [Using RNS](https://reticulum.network/manual/using.html) · [Interfaces](https://reticulum.network/manual/interfaces.html) · [PDF](https://github.com/markqvist/Reticulum/blob/master/docs/Reticulum%20Manual.pdf) · [Source](https://github.com/markqvist/Reticulum) |
+| **LXMF** | Messaging over Reticulum | [GitHub](https://github.com/markqvist/LXMF) |
+| **NomadNet** | Node pages (Micron / `.mu`) and LXMF client | [GitHub](https://github.com/markqvist/NomadNet) · [README](https://github.com/markqvist/NomadNet/blob/master/README.md) |
+| **Sideband** | Desktop / mobile LXMF client | [GitHub](https://github.com/markqvist/Sideband) |
+
+FAQ and community notes: [Reticulum wiki](https://github.com/markqvist/Reticulum/wiki).
+
 A small appliance that puts a Reticulum / NomadNet node on a Raspberry Pi and exposes it as a web panel.
 
 The Pi joins the mesh, announces itself, hosts a default Micron page, and serves a browser UI on **HTTP port 80** and **HTTPS port 443** (self-signed certificate). No extra desktop stack is required.
@@ -98,4 +111,15 @@ Runs `gateway/gateway.py` in the current tree. Privileged ports 80/443 need root
 
 ## Licence
 
-Use and modify as you wish. Reticulum, LXMF and NomadNet are separate projects by Mark Qvist.
+Copyright 2026 Marek Żytko.
+
+This project is licensed under the **Apache License 2.0**. The full text is in `LICENSE`. Attribution notices are in `NOTICE`.
+
+You may use, modify and distribute the software, including commercially. If you redistribute it or a modified version you must:
+
+- keep this licence with the copy
+- keep the copyright line **Copyright 2026 Marek Żytko** and the `NOTICE` file
+- mark files you changed
+- not use the author’s name to imply endorsement of your fork
+
+Reticulum, LXMF and NomadNet are separate projects by Mark Qvist and keep their own licences.
