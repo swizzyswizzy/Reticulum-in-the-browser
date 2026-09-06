@@ -58,3 +58,10 @@ body.chat-on main { max-width: 760px; padding: 0 0 12px; }
 .filters { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 12px; }
 .chip { display: inline-block; padding: 6px 10px; border: 1px solid #333; border-radius: 999px; color: #aaa; font-size: 13px; }
 .chip.on, .chip:hover { color: #000; background: #fff; border-color: #fff; }
+
+.addr { position: relative; }
+.sug { position: absolute; left: 12px; right: 12px; top: 100%; margin-top: 4px; background: #111; border: 1px solid #333; border-radius: 8px; z-index: 30; overflow: hidden; }
+.sug-item { display: block; width: 100%; text-align: left; background: #111; color: #eee; border: 0; padding: 8px 10px; cursor: pointer; font: inherit; }
+.sug-item.on, .sug-item:hover { background: #222; }
+#ub:empty { display: none; }
+#ub:not(:empty) { display: inline-block; min-width: 1.2em; padding: 0 5px; margin-left: 4px; border-radius: 999px; background: #fff; color: #000; font-size: 11px; font-weight: 700; }

@@ -67,6 +67,9 @@ def load_store():
             data = {}
         data.setdefault("aliases", {})
         data.setdefault("history", [])
+        data.setdefault("pins", [])
+        data.setdefault("last_paths", {})
+        data.setdefault("unread", {})
         return data
 
 
@@ -113,12 +116,100 @@ def add_message(peer, direction, text, title="", status="ok"):
     })
     box["messages"] = box["messages"][-80:]
     save_msgs(store)
+    if direction == "in":
+        data = load_store()
+        data["unread"][peer] = int(data["unread"].get(peer) or 0) + 1
+        save_store(data)
     push_sse({
         "type": "lxmf",
         "peer": peer,
         "message": box["messages"][-1],
         "conversations": list_conversations(),
+        "unread": unread_total(),
     })
+
+
+def unread_total():
+    data = load_store()
+    return sum(int(v or 0) for v in (data.get("unread") or {}).values())
+
+
+def mark_read(peer):
+    data = load_store()
+    data["unread"][peer] = 0
+    save_store(data)
+
+
+def last_path_for(dest):
+    data = load_store()
+    return data.get("last_paths", {}).get(dest) or "/page/index.mu"
+
+
+def set_last_path(dest, path):
+    if not dest:
+        return
+    data = load_store()
+    data["last_paths"][dest] = path or "/page/index.mu"
+    save_store(data)
+
+
+def is_pinned(kind, hash_):
+    data = load_store()
+    return any(p.get("hash") == hash_ and p.get("kind") == kind for p in data.get("pins") or [])
+
+
+def toggle_pin(kind, hash_, name="", path=""):
+    data = load_store()
+    pins = data.get("pins") or []
+    exist = [p for p in pins if p.get("hash") == hash_ and p.get("kind") == kind]
+    if exist:
+        data["pins"] = [p for p in pins if not (p.get("hash") == hash_ and p.get("kind") == kind)]
+    else:
+        pins.insert(0, {"kind": kind, "hash": hash_, "name": name or hash_[:8], "path": path or last_path_for(hash_)})
+        data["pins"] = pins[:16]
+    save_store(data)
+    return not exist
+
+
+def suggest(q):
+    q = (q or "").strip().lower()
+    out = []
+    if not q:
+        return out
+    data = load_store()
+    for name, a in (data.get("aliases") or {}).items():
+        if q in name or q in (a.get("hash") or ""):
+            out.append({"label": name, "kind": "alias", "href": "#/" + name})
+    for p in data.get("pins") or []:
+        if q in (p.get("name") or "").lower() or q in (p.get("hash") or ""):
+            href = f"#/msg/{p['hash']}" if p.get("kind") == "lxmf" else f"#/node/{p['hash']}{p.get('path') or '/page/index.mu'}"
+            out.append({"label": p.get("name") or p["hash"][:8], "kind": "pin", "href": href})
+    for n in list_nodes():
+        blob = f"{n.get('name','')} {n.get('hash','')}".lower()
+        if q not in blob:
+            continue
+        k = node_kind(n)
+        if k == "lxmf":
+            href = f"#/msg/{n['hash']}"
+        else:
+            href = f"#/node/{n['hash']}{last_path_for(n['hash'])}"
+        out.append({"label": n.get("name") or n["hash"][:8], "kind": k, "href": href, "hash": n["hash"]})
+        if len(out) >= 8:
+            break
+    return out[:8]
+
+
+def group_nodes(items):
+    groups = {}
+    order = []
+    for n in items:
+        name = (n.get("name") or "").strip()
+        key = name.lower() if name and name.lower() != n["hash"][:12] else n["hash"]
+        if key not in groups:
+            groups[key] = {"name": name or n["hash"][:8], "page": None, "lxmf": None, "announce": None}
+            order.append(key)
+        groups[key][node_kind(n)] = n
+    return [groups[k] for k in order]
 
 
 def list_conversations():
@@ -1397,7 +1488,18 @@ def ui_home():
     data = load_store()
     aliases = data.get("aliases") or {}
     history = data.get("history") or []
+    pins = data.get("pins") or []
     n = len(list_nodes())
+    unread = unread_total()
+    pin_html = []
+    for p in pins:
+        href = f"#/msg/{p['hash']}" if p.get("kind") == "lxmf" else f"#/node/{p.get('hash')}{p.get('path') or last_path_for(p.get('hash'))}"
+        pin_html.append(
+            f'<a class="card node" href="{href}"><h3>{h(p.get("name"))}</h3>'
+            f'<div class="hash">{h(p.get("hash"))}</div>'
+            f'<div class="meta"><span class="badge">{h(p.get("kind"))}</span></div></a>'
+        )
+    pins_block = "".join(pin_html) or '<p class="muted">Star a page or chat to pin it here.</p>'
     al = "".join(
         f'<div class="card spread"><div><h3>{h(k)}</h3><div class="hash">{h(a.get("hash"))}</div></div>'
         f'<a class="ghost small" href="#/{h(k)}">Open</a></div>'
@@ -1408,14 +1510,17 @@ def ui_home():
         f'<a class="ghost small" href="#/{h(x.get("url"))}">Open</a></div>'
         for x in history
     ) or '<p class="muted">Empty.</p>'
+    chat_lbl = f"Messages · {unread}" if unread else "Messages"
     return f"""
     <h1>Gateway</h1>
     <p class="muted">Mesh on this device.</p>
     <div class="row" style="margin:14px 0">
       <a class="act" href="#/nodes">Browse nodes · {n}</a>
-      <a class="ghost" href="#/msg">Messages</a>
+      <a class="ghost" href="#/msg">{chat_lbl}</a>
       <a class="ghost" href="#/networks">Networks</a>
     </div>
+    <h2>Pinned</h2>
+    <div class="nodes">{pins_block}</div>
     <h2>Aliases</h2>{al}
     <h2>History</h2>{hist}
     """
@@ -1439,7 +1544,7 @@ def ui_nodes(q="", kind="all"):
     counts = {"all": len(items), "page": 0, "lxmf": 0, "announce": 0}
     for n in items:
         counts[node_kind(n)] += 1
-    show = []
+    filtered = []
     for n in items:
         k = node_kind(n)
         if kind != "all" and k != kind:
@@ -1447,19 +1552,35 @@ def ui_nodes(q="", kind="all"):
         blob = f"{n.get('name','')} {n.get('hash','')} {n.get('app','')}".lower()
         if q and q not in blob:
             continue
-        show.append((k, n))
+        filtered.append(n)
     cards = []
-    for k, n in show:
-        if k == "lxmf":
-            href = f"#/msg/{n['hash']}"
-        elif k == "page":
-            href = f"#/node/{n['hash']}/page/index.mu"
-        else:
-            href = f"#/node/{n['hash']}/page/index.mu"
+    for g in group_nodes(filtered):
+        page, lxmf, ann = g.get("page"), g.get("lxmf"), g.get("announce")
+        sample = page or lxmf or ann
+        last = last_path_for(page["hash"]) if page else ""
+        last_note = f"last {last.split('/')[-1]}" if page and last and last != "/page/index.mu" else ""
+        btns = []
+        if page:
+            btns.append(f'<a class="act small" href="#/node/{page["hash"]}{last}">Page</a>')
+        if lxmf:
+            btns.append(f'<a class="ghost small" href="#/msg/{lxmf["hash"]}">Message</a>')
+        if ann and not page:
+            btns.append(f'<a class="ghost small" href="#/node/{ann["hash"]}/page/index.mu">Announce</a>')
+        star_hash = (page or lxmf or ann)["hash"]
+        star_kind = "page" if page else ("lxmf" if lxmf else "announce")
+        star = "★" if is_pinned(star_kind, star_hash) else "☆"
+        hashes = " · ".join(x["hash"][:12] for x in (page, lxmf, ann) if x)
         cards.append(
-            f'<a class="card node" href="{href}"><h3>{h(n.get("name") or n["hash"][:8])}</h3>'
-            f'<div class="hash">{h(n["hash"])}</div>'
-            f'<div class="meta"><span class="badge">{k}</span><span>{age_label(n.get("age"))} ago</span></div></a>'
+            f'<div class="card node"><div class="spread"><h3>{h(g["name"])}</h3>'
+            f'<button class="ghost small" type="button" onclick="pin(\'{star_kind}\',\'{star_hash}\',\'{h(g["name"])}\')">{star}</button></div>'
+            f'<div class="hash">{h(hashes)}</div>'
+            f'<div class="meta">'
+            f'{("<span class=badge>page</span>" if page else "")}'
+            f'{("<span class=badge>lxmf</span>" if lxmf else "")}'
+            f'{("<span class=badge>announce</span>" if ann and not page else "")}'
+            f'<span>{age_label(sample.get("age"))} ago</span>'
+            f'{(" · " + h(last_note) if last_note else "")}</div>'
+            f'<div class="row" style="margin-top:8px">{"".join(btns)}</div></div>'
         )
     empty = {
         "page": "No hosted pages yet.",
@@ -1514,13 +1635,18 @@ def ui_networks():
 
 
 def ui_inbox():
+    unread = load_store().get("unread") or {}
     conv = list_conversations()
-    rows = "".join(
-        f'<a class="card spread node" href="#/msg/{h(c["peer"])}"><div><h3>{h(c.get("name"))}</h3>'
-        f'<div class="hash">{h(c.get("peer"))}</div><div class="muted">{h(c.get("last"))}</div></div>'
-        f'<span class="badge">{c.get("count") or 0}</span></a>'
-        for c in conv
-    ) or '<p class="muted">No threads. Paste an LXMF hash below.</p>'
+    rows = []
+    for c in conv:
+        u = int(unread.get(c["peer"]) or 0)
+        mark = f'<span class="badge">{u} new</span>' if u else f'<span class="badge">{c.get("count") or 0}</span>'
+        bold = " style=\"font-weight:700\"" if u else ""
+        rows.append(
+            f'<a class="card spread node" href="#/msg/{h(c["peer"])}"><div><h3{bold}>{h(c.get("name"))}</h3>'
+            f'<div class="hash">{h(c.get("peer"))}</div><div class="muted">{h(c.get("last"))}</div></div>{mark}</a>'
+        )
+    rows = "".join(rows) or '<p class="muted">No threads. Paste an LXMF hash below.</p>'
     me = lxmf_address or ""
     note = f"Your LXMF address: {h(me)}" if lxmf_ok else "LXMF is off."
     return f"""
@@ -1559,11 +1685,14 @@ def ui_thread(peer, inner_only=False):
         chat = '<p class="muted">Live thread. Incoming LXMF appears here.</p>'
     if inner_only:
         return chat
+    mark_read(peer)
+    star = "★" if is_pinned("lxmf", peer) else "☆"
     return f"""
     <div class="chat-app">
       <div class="chat-head">
         <a class="ghost small" href="#/msg">←</a>
         <div><h1>{h(peer[:8])}</h1><div class="hash">{h(peer)}</div></div>
+        <button class="ghost small" type="button" onclick="pin('lxmf','{peer}','{h(peer[:8])}')">{star}</button>
       </div>
       <div class="chat" id="chat" hx-get="/ui/thread-body?peer={h(peer)}" hx-trigger="every 2s" hx-swap="innerHTML">{chat}</div>
       <form class="composer" hx-post="/ui/send" hx-target="#chat" hx-swap="innerHTML" hx-on::after-request="this.reset()">
@@ -1577,7 +1706,8 @@ def ui_thread(peer, inner_only=False):
 
 def ui_page(dest, path):
     dest = (dest or "").strip().lower()
-    path = path or "/page/index.mu"
+    path = path or last_path_for(dest)
+    set_last_path(dest, path)
     data = fetch_nomad_page(dest, path)
     if not data.get("ok") and not data.get("html") and not data.get("text"):
         return f'<p class="warn">{h(data.get("error") or "Error")}</p>'
@@ -1586,9 +1716,14 @@ def ui_page(dest, path):
     with nodes_lock:
         n = nodes.get(dest) or {}
         name = n.get("name") or name
+    star = "★" if is_pinned("page", dest) else "☆"
     return f"""
     <div class="spread"><div><h1>{h(name)}</h1><div class="hash">{h(dest + path)}</div></div>
-    <button class="ghost small" type="button" onclick="saveAlias('{h(dest)}','{h(path)}')">Save alias</button></div>
+    <div class="row">
+      <button class="ghost small" type="button" onclick="pageBack()">Back</button>
+      <button class="ghost small" type="button" onclick="pin('page','{h(dest)}','{h(name)}','{h(path)}')">{star}</button>
+      <button class="ghost small" type="button" onclick="saveAlias('{h(dest)}','{h(path)}')">Alias</button>
+    </div></div>
     <div class="card page" id="body">{body}</div>
     """
 
@@ -1644,6 +1779,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
             body = {}
             form = parse_qs(raw.decode("utf-8", errors="replace"))
             body = {k: (v if len(v) > 1 else (v[0] if v else "")) for k, v in form.items()}
+        if parsed.path == "/ui/pin":
+            kind = body.get("kind") or "page"
+            hash_ = (body.get("hash") or "").lower()
+            toggle_pin(kind, hash_, body.get("name") or "", body.get("path") or "")
+            self._send(*json_bytes({"ok": True, "unread": unread_total()}))
+            return
         if parsed.path == "/ui/send":
             peer = body.get("peer") or ""
             text = (body.get("text") or "").strip()
@@ -1734,7 +1875,16 @@ class GatewayHandler(BaseHTTPRequestHandler):
             elif path in ("/ui/thread", "/ui/thread-body"):
                 html = ui_thread((query.get("peer") or [""])[0], inner_only=path.endswith("body"))
             elif path == "/ui/page":
-                html = ui_page((query.get("hash") or [""])[0], unquote((query.get("path") or ["/page/index.mu"])[0]))
+                dest = (query.get("hash") or [""])[0]
+                raw_path = (query.get("path") or [None])[0]
+                html = ui_page(dest, unquote(raw_path) if raw_path else last_path_for(dest))
+            elif path == "/ui/unread":
+                n = unread_total()
+                html = str(n) if n else ""
+            elif path == "/ui/suggest":
+                items = suggest((query.get("q") or [""])[0])
+                self._send(*json_bytes({"ok": True, "items": items}))
+                return
             else:
                 html = '<p class="warn">Not found</p>'
             self._send(200, "text/html; charset=utf-8", html.encode("utf-8"))
