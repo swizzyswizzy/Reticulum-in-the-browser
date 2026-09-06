@@ -44,12 +44,14 @@ fi
 systemctl daemon-reload
 systemctl reset-failed reticulum-gateway 2>/dev/null || true
 systemctl enable reticulum-gateway
-if [ "${RNS_AUTO_UPDATE:-0}" = "1" ]; then
-  systemctl enable --now reticulum-gateway-update.timer
-  echo "auto-update: włączony (co 6h + 10 min po starcie)"
-else
+if [ "${RNS_AUTO_UPDATE:-1}" = "0" ]; then
   systemctl disable --now reticulum-gateway-update.timer 2>/dev/null || true
+  echo "auto-update: wyłączony"
+else
+  systemctl enable --now reticulum-gateway-update.timer
+  echo "auto-update: włączony (co 1 min)"
 fi
+date "+%Y-%m-%d %H:%M:%S" > "$HOME_RNS/updated_at" || true
 
 LOG="$HOME_RNS/install.log"
 mkdir -p "$HOME_RNS"

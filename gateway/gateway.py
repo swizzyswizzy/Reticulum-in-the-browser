@@ -453,6 +453,24 @@ def load_local_page(req_path: str) -> str:
     return f"`!Brak strony``\n\nNie ma {req_path}\n"
 
 
+def is_our_node(dest_hash) -> bool:
+    if dest_hash is None:
+        return False
+    try:
+        if node_dest is not None and dest_hash == node_dest.hash:
+            return True
+        if lxmf_source is not None and dest_hash == getattr(lxmf_source, "hash", None):
+            return True
+        if node_identity is not None:
+            import RNS
+            for aspect in ("nomadnetwork.node", "lxmf.delivery"):
+                if RNS.Destination.hash_from_name_and_identity(aspect, node_identity) == dest_hash:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> dict:
     path = path or "/page/index.mu"
     if not path.startswith("/"):
@@ -484,7 +502,7 @@ def fetch_nomad_page(dest_hash_hex: str, path: str, timeout: float = 20.0) -> di
     if len(dest_hash) != 16:
         return {"ok": False, "error": "Hash musi mieć 32 znaki hex"}
 
-    if node_dest is not None and dest_hash == node_dest.hash:
+    if is_our_node(dest_hash):
         text = load_local_page(path)
         return {
             "ok": True,
@@ -782,14 +800,22 @@ def start_node_announce():
         except Exception as exc:
             return f"`!blad`` {exc}".encode("utf-8")
 
+    def link_in(link):
+        print("[gateway] link przychodzący po stronę")
+
     try:
-        node_dest.register_request_handler(
-            "/page",
-            response_generator=page_response,
-            allow=RNS.Destination.ALLOW_ALL,
-        )
+        node_dest.set_link_established_callback(link_in)
     except Exception as exc:
-        print(f"[gateway] handler stron: {exc}")
+        print(f"[gateway] callback linku: {exc}")
+    allow = getattr(RNS.Destination, "ALLOW_ALL", None)
+    for prefix in ("/page", "/page/", "/page/index.mu", "/"):
+        try:
+            kwargs = {"response_generator": page_response}
+            if allow is not None:
+                kwargs["allow"] = allow
+            node_dest.register_request_handler(prefix, **kwargs)
+        except Exception as exc:
+            print(f"[gateway] handler {prefix}: {exc}")
     app = device_name.encode("utf-8")
     h = hexhash(node_dest.hash)
     upsert_node({"hash": h, "name": device_name, "app": "nomadnetwork.node", "demo": False})
@@ -1229,20 +1255,31 @@ def start_mdns(port: int) -> None:
         print(f"[gateway] mDNS pominięty ({exc})")
 
 
-def git_version():
+def last_update_label():
+    for path in (
+        "/var/lib/rns/updated_at",
+        os.path.expanduser("~/.reticulum-gateway/updated_at"),
+    ):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read().strip()
+            if text:
+                return {"ok": True, "label": text}
+        except Exception:
+            pass
+        try:
+            ts = os.path.getmtime(path)
+            label = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+            return {"ok": True, "ts": ts, "label": label}
+        except Exception:
+            pass
     try:
-        import subprocess
-        count = subprocess.check_output(
-            ["git", "-C", REPO_ROOT, "rev-list", "--count", "HEAD"],
-            text=True, stderr=subprocess.DEVNULL,
-        ).strip()
-        sha = subprocess.check_output(
-            ["git", "-C", REPO_ROOT, "rev-parse", "--short=8", "HEAD"],
-            text=True, stderr=subprocess.DEVNULL,
-        ).strip()
-        return {"ok": True, "count": int(count), "hash": sha, "label": f"{count} {sha}"}
+        ts = os.path.getmtime(os.path.join(os.path.dirname(__file__), "gateway.py"))
+        label = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+        return {"ok": True, "ts": ts, "label": label}
     except Exception:
-        return {"ok": False, "count": 0, "hash": "", "label": "—"}
+        label = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        return {"ok": True, "label": label}
 
 
 def ensure_certs():
@@ -1407,7 +1444,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/version":
-            self._send(*json_bytes(git_version()))
+            self._send(*json_bytes(last_update_label()))
             return
 
         if path == "/api/hello":
