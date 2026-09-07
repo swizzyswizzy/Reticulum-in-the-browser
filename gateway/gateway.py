@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import socket
+import sqlite3
 import ssl
 import sys
 import threading
@@ -22,6 +23,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file_
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 DATA_FILE = os.path.expanduser("~/.reticulum-gateway/data.json")
 MSG_FILE = os.path.expanduser("~/.reticulum-gateway/messages.json")
+DB_FILE = os.path.expanduser("~/.reticulum-gateway/gateway.db")
 LXMF_DIR = os.path.expanduser("~/.reticulum-gateway/lxmf")
 PAGES_DIR = os.path.expanduser("~/.reticulum-gateway/pages")
 REPO_URL = "https://github.com/swizzyswizzy/Reticulum-in-the-browser"
@@ -58,49 +60,240 @@ demo_mode = False
 device_name = socket.gethostname() or "rNode"
 
 
-def load_store():
+def db_connect():
+    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
+    con = sqlite3.connect(DB_FILE, timeout=10)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
+    return con
+
+
+def init_db():
     with data_lock:
+        con = db_connect()
         try:
-            with open(DATA_FILE, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except Exception:
-            data = {}
-        data.setdefault("aliases", {})
-        data.setdefault("history", [])
-        data.setdefault("pins", [])
-        data.setdefault("last_paths", {})
-        data.setdefault("unread", {})
-        return data
+            con.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS kv (
+                  k TEXT PRIMARY KEY,
+                  v TEXT
+                );
+                CREATE TABLE IF NOT EXISTS nodes (
+                  hash TEXT PRIMARY KEY,
+                  name TEXT,
+                  app TEXT,
+                  last_seen REAL,
+                  demo INTEGER DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS aliases (
+                  name TEXT PRIMARY KEY,
+                  hash TEXT,
+                  path TEXT,
+                  title TEXT
+                );
+                CREATE TABLE IF NOT EXISTS pins (
+                  kind TEXT,
+                  hash TEXT,
+                  name TEXT,
+                  path TEXT,
+                  PRIMARY KEY (kind, hash)
+                );
+                CREATE TABLE IF NOT EXISTS history (
+                  url TEXT PRIMARY KEY,
+                  title TEXT,
+                  hash TEXT,
+                  path TEXT,
+                  ts REAL
+                );
+                CREATE TABLE IF NOT EXISTS last_paths (
+                  hash TEXT PRIMARY KEY,
+                  path TEXT
+                );
+                CREATE TABLE IF NOT EXISTS unread (
+                  peer TEXT PRIMARY KEY,
+                  n INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS peers (
+                  peer TEXT PRIMARY KEY,
+                  name TEXT
+                );
+                CREATE TABLE IF NOT EXISTS messages (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  peer TEXT,
+                  dir TEXT,
+                  text TEXT,
+                  title TEXT,
+                  status TEXT,
+                  ts REAL
+                );
+                CREATE INDEX IF NOT EXISTS messages_peer_ts ON messages(peer, ts);
+                """
+            )
+            con.commit()
+            migrate_json_if_needed(con)
+        finally:
+            con.close()
+
+
+def migrate_json_if_needed(con):
+    row = con.execute("SELECT v FROM kv WHERE k='migrated'").fetchone()
+    if row:
+        return
+    store = {}
+    try:
+        with open(DATA_FILE, encoding="utf-8") as fh:
+            store = json.load(fh) or {}
+    except Exception:
+        store = {}
+    for name, a in (store.get("aliases") or {}).items():
+        con.execute(
+            "INSERT OR REPLACE INTO aliases(name,hash,path,title) VALUES(?,?,?,?)",
+            (name, a.get("hash"), a.get("path"), a.get("title")),
+        )
+    for p in store.get("pins") or []:
+        con.execute(
+            "INSERT OR REPLACE INTO pins(kind,hash,name,path) VALUES(?,?,?,?)",
+            (p.get("kind"), p.get("hash"), p.get("name"), p.get("path")),
+        )
+    for i, x in enumerate(store.get("history") or []):
+        con.execute(
+            "INSERT OR REPLACE INTO history(url,title,hash,path,ts) VALUES(?,?,?,?,?)",
+            (x.get("url"), x.get("title"), x.get("hash"), x.get("path"), time.time() - i),
+        )
+    for dest, path in (store.get("last_paths") or {}).items():
+        con.execute("INSERT OR REPLACE INTO last_paths(hash,path) VALUES(?,?)", (dest, path))
+    for peer, n in (store.get("unread") or {}).items():
+        con.execute("INSERT OR REPLACE INTO unread(peer,n) VALUES(?,?)", (peer, int(n or 0)))
+    try:
+        with open(MSG_FILE, encoding="utf-8") as fh:
+            msgs = json.load(fh) or {}
+    except Exception:
+        msgs = {}
+    for peer, box in (msgs.get("peers") or {}).items():
+        con.execute(
+            "INSERT OR REPLACE INTO peers(peer,name) VALUES(?,?)",
+            (peer, box.get("name") or peer[:8]),
+        )
+        for m in box.get("messages") or []:
+            con.execute(
+                "INSERT INTO messages(peer,dir,text,title,status,ts) VALUES(?,?,?,?,?,?)",
+                (peer, m.get("dir"), m.get("text"), m.get("title"), m.get("status"), m.get("ts") or time.time()),
+            )
+    con.execute("INSERT OR REPLACE INTO kv(k,v) VALUES('migrated','1')")
+    con.commit()
+
+
+def load_store():
+    init_db()
+    with data_lock:
+        con = db_connect()
+        try:
+            aliases = {
+                r["name"]: {"hash": r["hash"], "path": r["path"], "title": r["title"]}
+                for r in con.execute("SELECT name,hash,path,title FROM aliases")
+            }
+            pins = [
+                {"kind": r["kind"], "hash": r["hash"], "name": r["name"], "path": r["path"]}
+                for r in con.execute("SELECT kind,hash,name,path FROM pins")
+            ]
+            history = [
+                {"url": r["url"], "title": r["title"], "hash": r["hash"], "path": r["path"]}
+                for r in con.execute("SELECT url,title,hash,path FROM history ORDER BY ts DESC LIMIT 40")
+            ]
+            last_paths = {r["hash"]: r["path"] for r in con.execute("SELECT hash,path FROM last_paths")}
+            unread = {r["peer"]: r["n"] for r in con.execute("SELECT peer,n FROM unread")}
+            return {
+                "aliases": aliases,
+                "pins": pins,
+                "history": history,
+                "last_paths": last_paths,
+                "unread": unread,
+            }
+        finally:
+            con.close()
 
 
 def save_store(data):
-    folder = os.path.dirname(DATA_FILE)
-    os.makedirs(folder, exist_ok=True)
-    tmp = DATA_FILE + ".tmp"
+    init_db()
     with data_lock:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, ensure_ascii=False)
-        os.replace(tmp, DATA_FILE)
+        con = db_connect()
+        try:
+            con.execute("DELETE FROM aliases")
+            for name, a in (data.get("aliases") or {}).items():
+                con.execute(
+                    "INSERT INTO aliases(name,hash,path,title) VALUES(?,?,?,?)",
+                    (name, a.get("hash"), a.get("path") or "/page/index.mu", a.get("title") or name),
+                )
+            con.execute("DELETE FROM pins")
+            for p in data.get("pins") or []:
+                con.execute(
+                    "INSERT INTO pins(kind,hash,name,path) VALUES(?,?,?,?)",
+                    (p.get("kind"), p.get("hash"), p.get("name"), p.get("path")),
+                )
+            con.execute("DELETE FROM history")
+            for x in (data.get("history") or [])[:40]:
+                con.execute(
+                    "INSERT INTO history(url,title,hash,path,ts) VALUES(?,?,?,?,?)",
+                    (x.get("url"), x.get("title"), x.get("hash"), x.get("path"), time.time()),
+                )
+            con.execute("DELETE FROM last_paths")
+            for dest, path in (data.get("last_paths") or {}).items():
+                con.execute("INSERT INTO last_paths(hash,path) VALUES(?,?)", (dest, path))
+            con.execute("DELETE FROM unread")
+            for peer, n in (data.get("unread") or {}).items():
+                con.execute("INSERT INTO unread(peer,n) VALUES(?,?)", (peer, int(n or 0)))
+            con.commit()
+        finally:
+            con.close()
 
 
 def load_msgs():
+    init_db()
     with msg_lock:
+        con = db_connect()
         try:
-            with open(MSG_FILE, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except Exception:
-            data = {}
-        data.setdefault("peers", {})
-        return data
+            peers = {}
+            for r in con.execute("SELECT peer,name FROM peers"):
+                peers[r["peer"]] = {"name": r["name"] or r["peer"][:8], "messages": []}
+            for r in con.execute(
+                "SELECT peer,dir,text,title,status,ts FROM messages ORDER BY ts ASC"
+            ):
+                box = peers.setdefault(r["peer"], {"name": r["peer"][:8], "messages": []})
+                box["messages"].append({
+                    "dir": r["dir"],
+                    "text": r["text"] or "",
+                    "title": r["title"] or "",
+                    "status": r["status"] or "ok",
+                    "ts": r["ts"] or 0,
+                })
+            for box in peers.values():
+                box["messages"] = box["messages"][-80:]
+            return {"peers": peers}
+        finally:
+            con.close()
 
 
 def save_msgs(data):
-    os.makedirs(os.path.dirname(MSG_FILE), exist_ok=True)
-    tmp = MSG_FILE + ".tmp"
+    init_db()
     with msg_lock:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, ensure_ascii=False)
-        os.replace(tmp, MSG_FILE)
+        con = db_connect()
+        try:
+            con.execute("DELETE FROM peers")
+            con.execute("DELETE FROM messages")
+            for peer, box in (data.get("peers") or {}).items():
+                con.execute(
+                    "INSERT INTO peers(peer,name) VALUES(?,?)",
+                    (peer, box.get("name") or peer[:8]),
+                )
+                for m in (box.get("messages") or [])[-80:]:
+                    con.execute(
+                        "INSERT INTO messages(peer,dir,text,title,status,ts) VALUES(?,?,?,?,?,?)",
+                        (peer, m.get("dir"), m.get("text"), m.get("title"), m.get("status"), m.get("ts") or time.time()),
+                    )
+            con.commit()
+        finally:
+            con.close()
 
 
 def add_message(peer, direction, text, title="", status="ok"):
@@ -246,7 +439,53 @@ def upsert_node(node: dict) -> None:
         prev.update(node)
         prev["last_seen"] = now()
         nodes[h] = prev
+    remember_node(nodes[h])
     push_sse({"type": "node", "node": public_node(nodes[h])})
+
+
+def remember_node(node: dict) -> None:
+    if node.get("demo"):
+        return
+    try:
+        init_db()
+        con = db_connect()
+        try:
+            con.execute(
+                "INSERT OR REPLACE INTO nodes(hash,name,app,last_seen,demo) VALUES(?,?,?,?,0)",
+                (node.get("hash"), node.get("name"), node.get("app"), node.get("last_seen") or time.time()),
+            )
+            con.execute(
+                "DELETE FROM nodes WHERE hash NOT IN (SELECT hash FROM nodes ORDER BY last_seen DESC LIMIT 400)"
+            )
+            con.commit()
+        finally:
+            con.close()
+    except Exception as exc:
+        print(f"[gateway] db node {exc}")
+
+
+def load_persisted_nodes() -> None:
+    try:
+        init_db()
+        con = db_connect()
+        try:
+            rows = list(con.execute("SELECT hash,name,app,last_seen,demo FROM nodes"))
+        finally:
+            con.close()
+    except Exception as exc:
+        print(f"[gateway] db load {exc}")
+        return
+    for r in rows:
+        with nodes_lock:
+            nodes[r["hash"]] = {
+                "hash": r["hash"],
+                "name": r["name"],
+                "app": r["app"],
+                "last_seen": r["last_seen"] or time.time(),
+                "demo": bool(r["demo"]),
+            }
+    if rows:
+        print(f"[gateway] loaded {len(rows)} saved nodes")
 
 
 def public_node(node: dict) -> dict:
@@ -2020,6 +2259,8 @@ def main():
     args = parser.parse_args()
     device_name = args.name
     demo_mode = args.demo
+    init_db()
+    load_persisted_nodes()
 
     if demo_mode:
         load_demo_nodes()
